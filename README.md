@@ -11,8 +11,8 @@ SL 트레일링, 급락/급등 시 즉시 탈출)하는 Bybit USDT 무기한선�
   로직이 아니라 레버리지/베팅 크기 문제이며, 그 방향으로 설정을 조정할수록 전액 손실
   확률도 함께 커집니다.
 - **현재 `config.yaml` 기본값은 보수적이지 않습니다.** 포지션당 자산의 25%를 증거금으로
-  쓰고(`risk.position_size_pct_of_equity`), 종목당 최대 4~15배 레버리지를 쓰며
-  (`risk.leverage_by_symbol`), 종목 4개까지 동시 진입(`risk.max_concurrent_positions`)이
+  쓰고(`risk.position_size_pct_of_equity`), 종목당 4~10배 레버리지를 쓰며
+  (`risk.leverage_by_symbol`), 최대 4개 포지션까지 동시 진입(`risk.max_concurrent_positions`)이
   가능하도록 설정되어 있습니다. 4개가 동시에 진입하면 증거금을 합산 100%까지 쓸 수 있고,
   손절 시 손실률은 더 이상 거래당 고정 %로 제한되지 않습니다 (레버리지 × 손절폭에 따라
   달라짐). 이 값들은 의도적으로 이렇게 설정한 것이니, 감당 가능한 리스크인지 스스로
