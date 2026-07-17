@@ -113,12 +113,11 @@ class Strategy:
         lev_min = min(lev_min, max_leverage)
         leverage = max(lev_min, round(lev_min + signal["confidence"] * (max_leverage - lev_min)))
 
-        sizing = position_sizing.compute_qty(
+        sizing = position_sizing.compute_qty_fixed_margin(
             equity=equity,
-            risk_per_trade_pct=self.risk_cfg.get("risk_per_trade_pct", 1.5),
+            position_pct_of_equity=self.risk_cfg.get("position_size_pct_of_equity", 25.0),
+            leverage=leverage,
             entry_price=entry_price,
-            stop_loss_price=prospective["initial_sl"],
-            max_leverage=leverage,
             qty_step=inst.qty_step,
             min_qty=inst.min_qty,
             min_notional=self.risk_cfg.get("min_order_notional_usdt", 5.0),

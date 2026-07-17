@@ -8,8 +8,13 @@ exchange:
   symbols: ["BTCUSDT", "ETHUSDT", "SOXLUSDT", "SOLUSDT"]
 
 risk:
-  # % of account equity you are willing to lose if SL is hit, per trade.
-  risk_per_trade_pct: 1.5
+  # margin allocated per position, as % of account equity. Position notional =
+  # equity * position_size_pct_of_equity / 100 * leverage. With
+  # max_concurrent_positions symbols open at once, total margin in use can reach
+  # position_size_pct_of_equity% * max_concurrent_positions (e.g. 25% * 4 = 100%).
+  # NOTE: unlike a risk-per-trade-% scheme, the loss if SL is hit is NOT fixed to
+  # a set % of equity here -- it depends on leverage and stop-loss distance.
+  position_size_pct_of_equity: 25.0
   # hard cap on leverage the bot will ever request, regardless of signal confidence.
   # used as the [1, max_leverage] range for any symbol not listed in leverage_by_symbol below.
   max_leverage: 5
@@ -26,7 +31,7 @@ risk:
   # the equity it had at the start of the day (UTC).
   max_daily_loss_pct: 8.0
   # bot stops opening new trades once this many are open at the same time.
-  max_concurrent_positions: 1
+  max_concurrent_positions: 4
   # minimum aggregated confidence (0-1) required to open a position at all.
   min_confidence_to_enter: 0.55
   # minimum notional order size in quote currency (USDT). Trades smaller than
