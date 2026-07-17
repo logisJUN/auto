@@ -58,11 +58,12 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      데이터가 적으면(신뢰도 낮음) 자동으로 영향력이 줄어듭니다.
 2. **진입 조건**: 종합 신호의 방향이 중립이 아니고, 신뢰도가
    `risk.min_confidence_to_enter`(기본 0.55) 이상이며, 동시보유 한도/일일 손실 한도를
-   넘지 않을 때만 진입. 신뢰도가 높을수록 레버리지를 `risk.max_leverage` 한도 내에서
-   더 많이 사용.
+   넘지 않을 때만 진입. 신뢰도가 높을수록 레버리지를 `risk.leverage_by_symbol[종목].max`
+   쪽으로, 낮을수록 `.min` 쪽으로 사용 (종목별로 다른 범위 설정 가능, 목록에 없는
+   종목은 `[1, risk.max_leverage]` 범위 사용).
 3. **포지션 사이징**: 레버리지가 아니라 **손절가에 닿았을 때 잃는 금액이 계좌 자산의
    `risk.risk_per_trade_pct`(기본 1.5%)를 넘지 않도록** 수량을 계산합니다. 그 수량이
-   요구하는 레버리지가 `risk.max_leverage`를 넘으면 레버리지 한도에 맞춰 수량을 줄입니다.
+   요구하는 레버리지가 해당 종목의 레버리지 상한을 넘으면 한도에 맞춰 수량을 줄입니다.
 4. **초기 손절/익절**: 진입 시점 ATR(변동성) 기반. `atr_sl_multiplier`,
    `atr_tp_multiplier`로 조절.
 5. **포지션 관리 (8~20초마다)**:
@@ -264,7 +265,8 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 |---|---|
 | `exchange.symbols` | 매매할 종목 목록 |
 | `risk.risk_per_trade_pct` | 거래당 손절 시 잃을 자산 비율 |
-| `risk.max_leverage` | 절대 넘지 않을 레버리지 상한 |
+| `risk.max_leverage` | `leverage_by_symbol`에 없는 종목의 레버리지 상한 (하한은 1) |
+| `risk.leverage_by_symbol` | 종목별 `{min, max}` 레버리지 범위. 신뢰도에 따라 그 범위 내에서 보간 |
 | `risk.max_daily_loss_pct` | 이 손실률에 도달하면 당일 신규 진입 중단 |
 | `risk.min_confidence_to_enter` | 이 신뢰도 미만이면 진입 안 함 (높일수록 거래 빈도↓ 확신도↑) |
 | `signals.weights` | 기술적/거래량/뉴스/폴리마켓 각 신호의 반영 비중 |

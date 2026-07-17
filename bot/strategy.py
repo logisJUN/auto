@@ -106,8 +106,12 @@ class Strategy:
         prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, signal["atr"], self.trade_cfg)
 
         inst = self.client.get_instrument_info(symbol)
-        max_leverage = min(self.risk_cfg.get("max_leverage", 5), inst.max_leverage)
-        leverage = max(1, round(1 + signal["confidence"] * (max_leverage - 1)))
+        lev_range = self.risk_cfg.get("leverage_by_symbol", {}).get(symbol, {})
+        lev_min = lev_range.get("min", 1)
+        lev_max = lev_range.get("max", self.risk_cfg.get("max_leverage", 5))
+        max_leverage = min(lev_max, inst.max_leverage)
+        lev_min = min(lev_min, max_leverage)
+        leverage = max(lev_min, round(lev_min + signal["confidence"] * (max_leverage - lev_min)))
 
         sizing = position_sizing.compute_qty(
             equity=equity,
