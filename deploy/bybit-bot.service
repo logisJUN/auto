@@ -1,0 +1,16 @@
+[Unit]
+Description=Bybit futures trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# TODO: change to the actual path where you cloned this repo
+WorkingDirectory=/home/YOUR_USER/auto
+ExecStart=/home/YOUR_USER/auto/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+User=YOUR_USER
+
+[Install]
+WantedBy=multi-user.target

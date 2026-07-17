@@ -1,0 +1,85 @@
+# =========================================================================
+# Bybit futures bot configuration
+# Tune these instead of touching code. See README.md for what each does.
+# =========================================================================
+
+exchange:
+  category: "linear"          # USDT perpetual futures
+  symbols: ["BTCUSDT", "ETHUSDT"]
+
+risk:
+  # % of account equity you are willing to lose if SL is hit, per trade.
+  risk_per_trade_pct: 1.5
+  # hard cap on leverage the bot will ever request, regardless of signal confidence.
+  max_leverage: 5
+  # bot stops opening new trades for the day once realized loss hits this % of
+  # the equity it had at the start of the day (UTC).
+  max_daily_loss_pct: 8.0
+  # bot stops opening new trades once this many are open at the same time.
+  max_concurrent_positions: 1
+  # minimum aggregated confidence (0-1) required to open a position at all.
+  min_confidence_to_enter: 0.55
+  # minimum notional order size in quote currency (USDT). Trades smaller than
+  # this are skipped rather than sent (avoids exchange min-qty rejects).
+  min_order_notional_usdt: 5.0
+
+signals:
+  weights:
+    technical: 0.45
+    volume: 0.15
+    news: 0.20
+    polymarket: 0.20
+  technical:
+    timeframes: ["15", "60", "240"]   # minutes; last one weighted heaviest (trend filter)
+    rsi_period: 14
+    ema_fast: 12
+    ema_slow: 26
+    atr_period: 14
+    kline_limit: 200
+  news:
+    feeds:
+      - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      - "https://cointelegraph.com/rss"
+      - "https://cryptoslate.com/feed/"
+    refresh_minutes: 15
+    lookback_hours: 12
+    max_articles: 60
+  polymarket:
+    keywords: ["bitcoin", "ethereum", "crypto", "fed ", "interest rate", "recession"]
+    refresh_minutes: 15
+    max_markets: 40
+
+trade_management:
+  # initial stop distance = atr * this multiplier
+  atr_sl_multiplier: 1.5
+  # initial take-profit distance = atr * this multiplier
+  atr_tp_multiplier: 2.5
+  # once unrealized profit reaches this multiple of the initial risk (R),
+  # start trailing (move SL to breakeven and beyond).
+  breakeven_after_rr: 0.5
+  trail_activation_rr: 1.0
+  # how far (in ATR) to push SL behind price once trailing is active.
+  trail_atr_multiplier: 1.2
+  # if signals/momentum still strongly favor the position when price nears TP,
+  # extend TP outward by this many ATR instead of taking profit immediately.
+  tp_extend_atr_step: 0.75
+  # only extend TP this many times per trade, to avoid never taking profit.
+  max_tp_extensions: 3
+  # emergency exit: if price moves this % against the position within
+  # flash_move_window_sec, close immediately at market regardless of SL.
+  flash_move_pct: 1.2
+  flash_move_window_sec: 45
+  # if the fast signal flips hard against an open position (score crosses
+  # this magnitude opposite to position side) with decent confidence, exit early.
+  reversal_exit_score: 0.4
+  reversal_exit_confidence: 0.6
+
+loop:
+  fast_poll_sec: 8          # price/emergency-exit checks while a position is open
+  idle_poll_sec: 20         # checks while flat, waiting for an entry signal
+  signal_refresh_sec: 120   # how often to recompute the full multi-factor signal
+
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080

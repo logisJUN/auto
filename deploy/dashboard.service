@@ -1,0 +1,15 @@
+[Unit]
+Description=Bybit bot monitoring dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+# TODO: change to the actual path where you cloned this repo
+WorkingDirectory=/home/YOUR_USER/auto
+ExecStart=/home/YOUR_USER/auto/.venv/bin/python -m dashboard.app
+Restart=always
+RestartSec=10
+User=YOUR_USER
+
+[Install]
+WantedBy=multi-user.target

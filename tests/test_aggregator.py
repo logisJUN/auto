@@ -1,0 +1,40 @@
+from bot.signals import aggregator
+
+WEIGHTS = {"technical": 0.45, "volume": 0.15, "news": 0.20, "polymarket": 0.20}
+
+
+def test_all_signals_bullish_gives_strong_long_confidence():
+    technical = {"score": 0.8, "atr": 1.0, "close": 100.0, "volume_score": 0.5}
+    news = {"score": 0.6, "confidence": 0.8, "sample": []}
+    poly = {"score": 0.5, "confidence": 0.6, "sample": []}
+    result = aggregator.aggregate(technical, news, poly, WEIGHTS)
+    assert result["direction"] == "long"
+    assert result["score"] > 0.3
+    assert result["confidence"] > 0.5
+
+
+def test_conflicting_signals_lower_confidence_than_agreement():
+    technical = {"score": 0.8, "atr": 1.0, "close": 100.0, "volume_score": 0.5}
+    news_agree = {"score": 0.6, "confidence": 0.8, "sample": []}
+    news_conflict = {"score": -0.6, "confidence": 0.8, "sample": []}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+
+    agree = aggregator.aggregate(technical, news_agree, poly, WEIGHTS)
+    conflict = aggregator.aggregate(technical, news_conflict, poly, WEIGHTS)
+    assert agree["confidence"] > conflict["confidence"]
+
+
+def test_no_data_signals_default_to_neutral():
+    technical = {"score": 0.0, "atr": 1.0, "close": 100.0, "volume_score": 0.0}
+    news = {"score": 0.0, "confidence": 0.0, "sample": []}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+    result = aggregator.aggregate(technical, news, poly, WEIGHTS)
+    assert result["direction"] == "neutral"
+
+
+def test_low_confidence_news_has_less_influence_than_high_confidence():
+    technical = {"score": 0.0, "atr": 1.0, "close": 100.0, "volume_score": 0.0}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+    low_conf = aggregator.aggregate(technical, {"score": -0.9, "confidence": 0.1, "sample": []}, poly, WEIGHTS)
+    high_conf = aggregator.aggregate(technical, {"score": -0.9, "confidence": 0.9, "sample": []}, poly, WEIGHTS)
+    assert abs(high_conf["score"]) > abs(low_conf["score"])
