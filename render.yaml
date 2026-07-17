@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: bybit-bot
+    runtime: python
+    plan: starter # a 24/7 trading bot must not sleep -- do not use "free"
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: BYBIT_TESTNET
+        value: "true"
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DASHBOARD_TOKEN
+        sync: false
+      - key: DATA_DIR
+        value: /var/data/data
+      - key: LOG_DIR
+        value: /var/data/logs
+    disk:
+      name: bybit-bot-data
+      mountPath: /var/data
+      sizeGB: 1

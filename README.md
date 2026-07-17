@@ -39,6 +39,8 @@ bot/
   main.py            메인 루프 (entry point)
 dashboard/app.py     아이패드에서 볼 수 있는 읽기 전용 모니터링 웹페이지
 deploy/              VPS에 24시간 서비스로 등록하기 위한 systemd 유닛 파일
+render_app.py         Render 배포용: 봇 루프(스레드) + 대시보드를 한 프로세스로 결합
+render.yaml           Render Blueprint (서비스/환경변수/디스크 정의)
 tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테스트
 ```
 
@@ -168,6 +170,56 @@ journalctl -u bybit-bot -f        # 실시간 로그
 3. **푸시 알림 (선택)**: `.env`에 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`를
    설정하면 진입/청산/긴급탈출 시마다 텔레그램으로 알림이 옵니다. 대시보드를
    계속 열어두지 않아도 잠금화면 알림으로 확인 가능합니다.
+
+---
+
+## Render에 배포하기
+
+VPS 대신 [Render](https://render.com)에서 돌리고 싶다면 아래처럼 구성합니다. Render는
+서비스당 HTTP 포트를 하나만 열어주고, 서비스끼리 디스크를 공유하지 않기 때문에
+(VPS 구성처럼 봇과 대시보드를 별도 프로세스 2개로 나눌 수 없음) `render_app.py`가
+**봇 루프를 백그라운드 스레드로 돌리면서 같은 프로세스에서 대시보드를 서빙**하도록
+합쳐져 있습니다.
+
+### A. Blueprint로 배포 (권장)
+
+레포에 포함된 `render.yaml`을 그대로 사용합니다.
+
+1. Render 대시보드 → **New** → **Blueprint** → 이 레포 선택 → `render.yaml` 자동 인식.
+2. 배포 전에 `sync: false`로 표시된 환경변수를 Render 대시보드에서 직접 채워넣습니다:
+   `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `NEWSAPI_KEY`(선택), `TELEGRAM_BOT_TOKEN`(선택),
+   `TELEGRAM_CHAT_ID`(선택), `DASHBOARD_TOKEN`(무작위 값으로).
+3. `BYBIT_TESTNET`은 기본 `true`. 실거래로 전환하려면 `false`로 바꾸세요.
+4. Start Command는 `gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
+   입니다. **gunicorn 워커는 반드시 1개**여야 합니다 (워커가 늘어나면 봇 루프가 프로세스마다
+   중복 실행됩니다).
+
+### B. 수동으로 Web Service 생성
+
+Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
+- 위 3.의 환경변수들을 동일하게 설정.
+
+### C. 플랜과 영구 디스크 (중요)
+
+- **Free 플랜은 쓰지 마세요.** Free Web Service는 15분간 요청이 없으면 슬립 상태로
+  들어가는데, 그 순간 봇 루프도 함께 멈춥니다. 실거래/모의투자 상관없이 24시간 운영이
+  목적이라면 최소 **Starter 플랜**(슬립 없음)이 필요합니다. `render.yaml`에도
+  `plan: starter`로 지정되어 있습니다.
+- Render는 배포/재시작 시 컨테이너 파일시스템이 초기화됩니다. 열린 포지션 기록
+  (`data/state.json`)과 로그(`logs/`)가 재배포마다 사라지는 걸 막으려면 **영구 디스크**를
+  붙여야 합니다. `render.yaml`은 `/var/data`에 1GB 디스크를 마운트하고
+  `DATA_DIR=/var/data/data`, `LOG_DIR=/var/data/logs` 환경변수로 봇/대시보드가 그 경로를
+  쓰도록 지정해 두었습니다. (디스크는 Starter 이상 플랜에서만 사용 가능합니다.)
+- 디스크 없이 배포하면 봇 자체는 정상 동작하지만, 재배포될 때마다 일일 손실 한도
+  카운터와 열린 포지션 추적 상태가 초기화된다는 점을 감안하세요 (실제 거래소 포지션은
+  Bybit 서버에 걸린 SL/TP로 계속 보호됩니다).
+
+### D. 대시보드 접속
+
+배포된 서비스 URL의 `/?token=<DASHBOARD_TOKEN>`으로 접속합니다. 예:
+`https://bybit-bot.onrender.com/?token=...`
 
 ---
 

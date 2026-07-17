@@ -7,6 +7,7 @@ Run: python -m dashboard.app
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -127,7 +128,7 @@ def _decision_summary(d: dict) -> str:
 @app.route("/")
 def index():
     _check_token()
-    state = StateStore("data/state.json")
+    state = StateStore(os.path.join(os.getenv("DATA_DIR", "data"), "state.json"))
     snapshot = state.snapshot()
 
     try:
@@ -151,7 +152,7 @@ def index():
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized})
 
-    decisions_raw = read_recent_decisions("logs", limit=30)
+    decisions_raw = read_recent_decisions(os.getenv("LOG_DIR", "logs"), limit=30)
     decisions = []
     for d in decisions_raw:
         decisions.append({
@@ -176,7 +177,8 @@ def index():
 
 def main():
     host = cfg.get("dashboard", "host", default="0.0.0.0")
-    port = cfg.get("dashboard", "port", default=8080)
+    # Render (and most PaaS) assign the listen port via $PORT at runtime.
+    port = int(os.getenv("PORT", cfg.get("dashboard", "port", default=8080)))
     app.run(host=host, port=port)
 
 
