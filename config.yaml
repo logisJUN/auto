@@ -5,7 +5,7 @@
 
 exchange:
   category: "linear"          # USDT perpetual futures
-  symbols: ["BTCUSDT", "ETHUSDT"]
+  symbols: ["BTCUSDT", "ETHUSDT", "SOXLUSDT", "SOLUSDT"]
 
 risk:
   # % of account equity you are willing to lose if SL is hit, per trade.
