@@ -125,6 +125,13 @@ def _decision_summary(d: dict) -> str:
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 
+@app.route("/healthz")
+def healthz():
+    # Public, no token, no Bybit calls -- meant for uptime pingers (e.g.
+    # UptimeRobot) keeping a Render free-plan service from sleeping.
+    return "ok", 200
+
+
 @app.route("/")
 def index():
     _check_token()

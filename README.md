@@ -201,25 +201,60 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 - Start Command: `gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
 - 위 3.의 환경변수들을 동일하게 설정.
 
-### C. 플랜과 영구 디스크 (중요)
+### C. 플랜 선택: Free + UptimeRobot vs Starter + 디스크
 
-- **Free 플랜은 쓰지 마세요.** Free Web Service는 15분간 요청이 없으면 슬립 상태로
-  들어가는데, 그 순간 봇 루프도 함께 멈춥니다. 실거래/모의투자 상관없이 24시간 운영이
-  목적이라면 최소 **Starter 플랜**(슬립 없음)이 필요합니다. `render.yaml`에도
-  `plan: starter`로 지정되어 있습니다.
-- Render는 배포/재시작 시 컨테이너 파일시스템이 초기화됩니다. 열린 포지션 기록
-  (`data/state.json`)과 로그(`logs/`)가 재배포마다 사라지는 걸 막으려면 **영구 디스크**를
-  붙여야 합니다. `render.yaml`은 `/var/data`에 1GB 디스크를 마운트하고
-  `DATA_DIR=/var/data/data`, `LOG_DIR=/var/data/logs` 환경변수로 봇/대시보드가 그 경로를
-  쓰도록 지정해 두었습니다. (디스크는 Starter 이상 플랜에서만 사용 가능합니다.)
-- 디스크 없이 배포하면 봇 자체는 정상 동작하지만, 재배포될 때마다 일일 손실 한도
-  카운터와 열린 포지션 추적 상태가 초기화된다는 점을 감안하세요 (실제 거래소 포지션은
-  Bybit 서버에 걸린 SL/TP로 계속 보호됩니다).
+`render.yaml`은 기본값이 **`plan: free`** 입니다. Free Web Service는 15분간 아무 HTTP
+요청도 없으면 슬립되고, 슬립되는 순간 봇 루프도 같이 멈춥니다. 이를 막으려면
+[UptimeRobot](https://uptimerobot.com) 같은 외부 핑 서비스로 슬립되기 전에 주기적으로
+요청을 보내야 합니다 (아래 E 참고). 두 방식의 트레이드오프:
+
+| | **Free + UptimeRobot** | **Starter + 영구 디스크** |
+|---|---|---|
+| 비용 | 무료 | 최소 $7/월 |
+| 슬립 방지 | 핑이 15분 내에 계속 도착해야 함 (실패하면 슬립 → 재기동) | 애초에 슬립 안 함 |
+| 상태 영속성 | **없음.** 슬립되거나(핑 실패/지연), 재배포되거나, 크래시 나면 `data/state.json`·`logs/`가 초기화됨 | 영구 디스크 사용 시 재배포/재시작에도 유지됨 |
+| 월 사용량 한도 | Render 계정 전체에서 무료 인스턴스 750시간/월 공유 (24시간 서비스 하나만 있어도 거의 꽉 참) | 한도 없음 |
+
+**Free + UptimeRobot을 선택했다면** (지금 `render.yaml` 기본값) 다음을 감안하세요:
+- 실제 포지션의 SL/TP는 항상 Bybit 거래소 서버에 주문으로 걸려 있으므로, 봇 프로세스가
+  멈춰도(슬립/재기동 중) 청산 자체는 거래소가 대신 집행합니다.
+- 하지만 **"일일 손실 한도 도달 시 신규 진입 중단"** 로직은 `data/state.json`의
+  `daily.realized_pnl`을 기준으로 판단하는데, 슬립 후 재기동되면 이 값이 사라져 한도가
+  리셋됩니다. 즉 한도 보호가 완벽하지 않을 수 있습니다.
+- 테스트넷 검증 단계나 소액 운영에는 괜찮지만, 실거래 규모를 키운다면 Starter로
+  전환하고 영구 디스크를 붙이는 걸 권장합니다. 전환하려면 `render.yaml`에서
+  `plan: free`를 `plan: starter`로 바꾸고 아래를 추가하면 됩니다:
+  ```yaml
+      envVars:
+        - key: DATA_DIR
+          value: /var/data/data
+        - key: LOG_DIR
+          value: /var/data/logs
+      disk:
+        name: bybit-bot-data
+        mountPath: /var/data
+        sizeGB: 1
+  ```
 
 ### D. 대시보드 접속
 
 배포된 서비스 URL의 `/?token=<DASHBOARD_TOKEN>`으로 접속합니다. 예:
 `https://bybit-bot.onrender.com/?token=...`
+
+### E. UptimeRobot으로 슬립 방지 (Free 플랜)
+
+1. [uptimerobot.com](https://uptimerobot.com)에서 무료 계정 생성.
+2. **Add New Monitor** → Monitor Type: `HTTP(s)`.
+3. URL: `https://<서비스이름>.onrender.com/healthz` (대시보드 `/`가 아니라 반드시
+   `/healthz`를 사용하세요 - 토큰 없이 200을 반환하는 전용 헬스체크 경로라 오탐도 없고
+   Bybit API를 호출하지 않아 가볍습니다).
+4. Monitoring Interval: **5분** (UptimeRobot 무료 플랜 최소 간격이 5분이라, 요청하신
+   14분도 문제없이 설정 가능하지만 Render의 15분 슬립 기준을 안전하게 피하려면 5~10분
+   간격을 권장합니다. 14분으로 하면 Render 쪽 타이밍/지연에 따라 간발의 차로 슬립되는
+   경우가 생길 수 있습니다).
+5. 저장 후 UptimeRobot의 Response Time 그래프에서 계속 200이 찍히는지 확인하세요.
+   한 번이라도 슬립되어 Render가 콜드스타트하면 그 응답은 지연되거나 실패로 찍힐 수
+   있습니다 (콜드스타트는 보통 수십 초 소요).
 
 ---
 
