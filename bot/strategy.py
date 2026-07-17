@@ -152,13 +152,14 @@ class Strategy:
                                      "leverage": leverage, "signal": signal})
 
     # -- exits / management ---------------------------------------------------------
-    def _close_and_settle(self, symbol: str, trade: dict, reason: str):
-        try:
-            self.client.close_position(symbol, trade["side"], trade["qty"])
-        except BybitAPIError as exc:
-            logger.error("failed to close %s: %s", symbol, exc)
-            log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
-            return
+    def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
+        if not already_closed:
+            try:
+                self.client.close_position(symbol, trade["side"], trade["qty"])
+            except BybitAPIError as exc:
+                logger.error("failed to close %s: %s", symbol, exc)
+                log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
+                return
 
         try:
             exit_price = self.client.get_last_price(symbol)
@@ -191,8 +192,10 @@ class Strategy:
 
         exchange_position = self.client.get_position(symbol)
         if exchange_position is None:
-            # SL or TP was hit on the exchange side since our last check.
-            self._close_and_settle(symbol, trade, "sl_tp_hit")
+            # SL or TP was hit on the exchange side since our last check -- there is
+            # nothing left to close, so don't place a reduce-only order against a
+            # position that's already zero (Bybit rejects it with ErrCode 110017).
+            self._close_and_settle(symbol, trade, "sl_tp_hit", already_closed=True)
             return
 
         price = self.client.get_last_price(symbol)
