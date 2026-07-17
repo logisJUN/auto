@@ -5,7 +5,7 @@
 
 exchange:
   category: "linear"          # USDT perpetual futures
-  symbols: ["ETHUSDT", "SOXLUSDT", "SOLUSDT", "SNXXUSDT", "SPCXUSDT"]
+  symbols: ["ETHUSDT", "SOXLUSDT", "SNXXUSDT", "SPCXUSDT"]
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
@@ -25,7 +25,6 @@ risk:
   leverage_by_symbol:
     ETHUSDT: {min: 5, max: 10}
     SOXLUSDT: {min: 4, max: 8}
-    SOLUSDT: {min: 5, max: 8}
     SNXXUSDT: {min: 6, max: 10}
     SPCXUSDT: {min: 7, max: 10}
   # bot stops opening new trades for the day once realized loss hits this % of
