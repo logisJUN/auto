@@ -33,6 +33,7 @@ def new_trade(symbol: str, side: str, entry_price: float, qty: float, atr: float
         "current_sl": sl,
         "current_tp": tp,
         "risk_distance": risk_distance,
+        "entry_atr": atr,
         "breakeven_moved": False,
         "trailing_active": False,
         "tp_extensions_used": 0,
@@ -65,9 +66,19 @@ class FlashMoveTracker:
         return (latest_price - oldest_price) / oldest_price * 100.0
 
 
-def check_flash_move(tracker: FlashMoveTracker, symbol: str, side: str, cfg: dict) -> bool:
-    """True if price has moved against the position by >= flash_move_pct within the window."""
-    threshold = cfg.get("flash_move_pct", 1.2)
+def check_flash_move(tracker: FlashMoveTracker, symbol: str, side: str, cfg: dict, entry_atr_pct: float) -> bool:
+    """True if price has moved against the position by more than a threshold
+    within the window. The threshold scales with the position's own entry-time
+    ATR (as a % of entry price) instead of being one fixed % for every symbol --
+    a fixed % is either too loose for a volatile symbol (it can drift a long way
+    before a fixed threshold ever fires) or too twitchy for a calm one.
+    `entry_atr_pct` is entry_atr / entry_price * 100, computed by the caller.
+    """
+    mult = cfg.get("flash_move_atr_mult", 1.0)
+    min_pct = cfg.get("flash_move_min_pct", 0.8)
+    max_pct = cfg.get("flash_move_max_pct", 3.0)
+    threshold = max(min_pct, min(max_pct, entry_atr_pct * mult))
+
     move = tracker.pct_move(symbol)
     if side == "long" and move <= -threshold:
         return True

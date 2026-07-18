@@ -114,9 +114,16 @@ trade_management:
   tp_extend_atr_step: 0.75
   # only extend TP this many times per trade, to avoid never taking profit.
   max_tp_extensions: 3
-  # emergency exit: if price moves this % against the position within
-  # flash_move_window_sec, close immediately at market regardless of SL.
-  flash_move_pct: 1.2
+  # emergency exit: if price moves against the position within
+  # flash_move_window_sec by at least flash_move_atr_mult x (that position's
+  # entry-time ATR as a % of entry price), close immediately at market
+  # regardless of SL. Scales with each symbol's own volatility instead of one
+  # fixed % for every symbol -- a fixed % can let a highly volatile coin drift
+  # a long way before ever firing, while being needlessly twitchy on a calm
+  # one. Clamped to [flash_move_min_pct, flash_move_max_pct] either way.
+  flash_move_atr_mult: 1.0
+  flash_move_min_pct: 0.8
+  flash_move_max_pct: 3.0
   flash_move_window_sec: 45
   # if the fast signal flips hard against an open position (score crosses
   # this magnitude opposite to position side) with decent confidence, exit early.

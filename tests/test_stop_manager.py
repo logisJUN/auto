@@ -10,7 +10,9 @@ CFG = {
     "trail_atr_multiplier": 1.2,
     "tp_extend_atr_step": 0.75,
     "max_tp_extensions": 3,
-    "flash_move_pct": 1.2,
+    "flash_move_atr_mult": 1.0,
+    "flash_move_min_pct": 0.8,
+    "flash_move_max_pct": 3.0,
     "flash_move_window_sec": 45,
     "reversal_exit_score": 0.4,
     "reversal_exit_confidence": 0.6,
@@ -25,6 +27,7 @@ def test_new_trade_long_sets_sl_tp_below_above_entry():
     assert trade["initial_sl"] == 100 - 2 * 1.5
     assert trade["initial_tp"] == 100 + 2 * 2.5
     assert trade["risk_distance"] == 3.0
+    assert trade["entry_atr"] == 2
 
 
 def test_new_trade_short_sets_sl_tp_above_below_entry():
@@ -67,14 +70,35 @@ def test_flash_move_detected_against_long_position():
     tracker = stop_manager.FlashMoveTracker()
     tracker.record("BTCUSDT", 100.0, window_sec=45)
     tracker.record("BTCUSDT", 98.0, window_sec=45)  # -2% within window
-    assert stop_manager.check_flash_move(tracker, "BTCUSDT", "long", CFG)
+    # entry_atr_pct=1.2 -> threshold clamped to 1.2 (within [0.8, 3.0])
+    assert stop_manager.check_flash_move(tracker, "BTCUSDT", "long", CFG, entry_atr_pct=1.2)
 
 
 def test_flash_move_not_triggered_for_small_moves():
     tracker = stop_manager.FlashMoveTracker()
     tracker.record("BTCUSDT", 100.0, window_sec=45)
     tracker.record("BTCUSDT", 99.5, window_sec=45)  # -0.5%, below 1.2% threshold
-    assert not stop_manager.check_flash_move(tracker, "BTCUSDT", "long", CFG)
+    assert not stop_manager.check_flash_move(tracker, "BTCUSDT", "long", CFG, entry_atr_pct=1.2)
+
+
+def test_flash_move_threshold_widens_for_high_atr_symbol_but_is_capped():
+    tracker = stop_manager.FlashMoveTracker()
+    tracker.record("VOLATILEUSDT", 100.0, window_sec=45)
+    tracker.record("VOLATILEUSDT", 97.5, window_sec=45)  # -2.5% within window
+    # entry_atr_pct=5.0 * mult(1.0) = 5.0, clamped down to max_pct(3.0) -> -2.5% doesn't clear it
+    assert not stop_manager.check_flash_move(tracker, "VOLATILEUSDT", "long", CFG, entry_atr_pct=5.0)
+    tracker.record("VOLATILEUSDT", 96.5, window_sec=45)  # now -3.5%, past the 3.0% cap
+    assert stop_manager.check_flash_move(tracker, "VOLATILEUSDT", "long", CFG, entry_atr_pct=5.0)
+
+
+def test_flash_move_threshold_narrows_for_low_atr_symbol_but_is_floored():
+    tracker = stop_manager.FlashMoveTracker()
+    tracker.record("STABLEUSDT", 100.0, window_sec=45)
+    tracker.record("STABLEUSDT", 99.5, window_sec=45)  # -0.5%
+    # entry_atr_pct=0.1 * mult(1.0) = 0.1, floored up to min_pct(0.8) -> -0.5% doesn't clear it
+    assert not stop_manager.check_flash_move(tracker, "STABLEUSDT", "long", CFG, entry_atr_pct=0.1)
+    tracker.record("STABLEUSDT", 99.1, window_sec=45)  # now -0.9%, past the 0.8% floor
+    assert stop_manager.check_flash_move(tracker, "STABLEUSDT", "long", CFG, entry_atr_pct=0.1)
 
 
 def test_signal_reversal_exit_triggers_on_strong_opposite_signal():

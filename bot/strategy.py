@@ -367,7 +367,11 @@ class Strategy:
         window = self.trade_cfg.get("flash_move_window_sec", 45)
         self.flash_tracker.record(symbol, price, window)
 
-        if stop_manager.check_flash_move(self.flash_tracker, symbol, trade["side"], self.trade_cfg):
+        entry_atr = trade.get("entry_atr", 0.0)
+        # entry_atr is missing on trades opened before this field existed --
+        # fall back to the old fixed 1.2% behavior for those until they close.
+        entry_atr_pct = (entry_atr / trade["entry_price"] * 100.0) if entry_atr > 0 and trade["entry_price"] > 0 else 1.2
+        if stop_manager.check_flash_move(self.flash_tracker, symbol, trade["side"], self.trade_cfg, entry_atr_pct):
             self._close_and_settle(symbol, trade, "emergency_flash_move")
             return
 
