@@ -106,6 +106,12 @@ trade_management:
     enabled: true
     # how close to the range high/low (in ATR) counts as "at the edge".
     edge_atr_mult: 0.5
+    # a neutral aggregate signal doesn't by itself mean price is actually
+    # ranging -- it can also happen mid-trend when sub-signals disagree. Only
+    # treat it as a real range if the high-low width over range_lookback
+    # candles is no more than this many ATR; a wider band means the market is
+    # trending/expanding, not consolidating, and range trades are skipped.
+    max_range_width_atr_mult: 4.0
     # tighter SL/TP than trend trades -- this is meant to be a quick scalp.
     atr_sl_multiplier: 1.0
     atr_tp_multiplier: 1.0

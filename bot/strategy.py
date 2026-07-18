@@ -179,6 +179,14 @@ class Strategy:
         if range_high <= 0 or range_low <= 0 or range_high <= range_low:
             return
 
+        # a neutral aggregate score doesn't guarantee price is actually ranging --
+        # it can also happen mid-trend when sub-signals disagree. Skip if the
+        # recent high-low band is too wide relative to ATR (that's expansion/
+        # trend, not consolidation), so we don't fade a real breakout.
+        max_width = atr * range_cfg.get("max_range_width_atr_mult", 4.0)
+        if (range_high - range_low) > max_width:
+            return
+
         edge = atr * range_cfg.get("edge_atr_mult", 0.5)
         if close <= range_low + edge:
             side = "long"

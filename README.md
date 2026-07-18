@@ -68,8 +68,12 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      `risk.leverage_by_symbol[종목].max` 쪽으로, 낮을수록 `.min` 쪽으로 사용 (종목별로
      다른 범위 설정 가능, 목록에 없는 종목은 `[1, risk.max_leverage]` 범위 사용).
    - **레인지(횡보) 역추세 단타**: 종합 신호가 **중립(neutral)일 때만** 시도. 최근
-     `signals.technical.range_lookback`(기본 20)개 봉의 고점/저점을 구해서, 현재가가
-     저점 근처(`range_trade.edge_atr_mult`×ATR 이내)면 롱, 고점 근처면 숏으로 진입.
+     `signals.technical.range_lookback`(기본 20)개 봉의 고점/저점을 구해서, 그 폭이
+     `range_trade.max_range_width_atr_mult`×ATR(기본 4배) 이내일 때만 "진짜 횡보"로
+     보고 진행합니다 (neutral이라고 다 횡보는 아니라서 — 신호들끼리 상쇄돼서 neutral이
+     나온 실제 추세 구간을 걸러내기 위함). 폭이 그보다 넓으면(추세/확장 국면) 레인지
+     매매를 시도하지 않습니다. 통과하면 현재가가 저점 근처
+     (`range_trade.edge_atr_mult`×ATR 이내)일 때 롱, 고점 근처일 때 숏으로 진입.
      레버리지는 신뢰도와 무관하게 항상 그 종목의 `leverage_by_symbol[종목].max` 사용.
      추세추종 진입과는 겹치지 않도록 상호 배타적으로 동작합니다.
 3. **포지션 사이징**: **계좌 자산의 `risk.position_size_pct_of_equity`(기본 25%)를
@@ -295,7 +299,7 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 | `signals.technical.range_lookback` | 레인지 고점/저점을 구할 때 볼 최근 봉 개수 |
 | `trade_management.*` | 손절/익절/트레일링/TP연장/긴급탈출 세부 파라미터 |
 | `trade_management.stale_exit_after_min` / `stale_exit_max_move_pct` | 이 시간 이상 열려있는데 가격이 이 %만큼도 안 움직였으면(횡보) 손익 무관 정리. 0으로 끄기 가능 |
-| `trade_management.range_trade.*` | 신호 중립일 때만 시도하는 레인지 역추세 단타 진입의 세부 파라미터 (`enabled`, `edge_atr_mult`, 자체 `atr_sl_multiplier`/`atr_tp_multiplier`) |
+| `trade_management.range_trade.*` | 신호 중립일 때만 시도하는 레인지 역추세 단타 진입의 세부 파라미터 (`enabled`, `edge_atr_mult`, `max_range_width_atr_mult`, 자체 `atr_sl_multiplier`/`atr_tp_multiplier`) |
 | `loop.fast_poll_sec` / `idle_poll_sec` | 포지션 보유 중 / 미보유 시 확인 주기 |
 
 ---
