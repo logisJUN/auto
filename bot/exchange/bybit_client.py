@@ -136,6 +136,30 @@ class BybitClient:
                 }
         return None
 
+    def get_closed_pnl(self, symbol: str) -> dict | None:
+        """Returns the exchange's own record for the most recently closed position
+        on `symbol`, whose closedPnl is net of trading fees (unlike computing
+        entry/exit price difference ourselves, which ignores fees). Returns None
+        if no record is found yet (can lag a close by a few seconds) or on error --
+        callers should fall back to an estimate in that case.
+        """
+        try:
+            result = self._call(self.session.get_closed_pnl, category=self.category, symbol=symbol, limit=1)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        rec = lst[0]
+        try:
+            return {
+                "closed_pnl": float(rec["closedPnl"]),
+                "avg_exit_price": float(rec["avgExitPrice"]),
+                "updated_time_ms": int(rec["updatedTime"]),
+            }
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def set_leverage(self, symbol: str, leverage: float) -> None:
         lev = str(int(leverage))
         try:

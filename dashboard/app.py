@@ -15,7 +15,8 @@ from flask import Flask, abort, render_template_string, request
 
 from bot.config import load_config
 from bot.exchange.bybit_client import BybitClient, BybitAPIError
-from bot.logger import read_recent_decisions
+from bot.logger import compute_performance_summary, read_recent_decisions
+from bot.risk import stress_test
 from bot.state import StateStore
 
 app = Flask(__name__)
@@ -26,6 +27,23 @@ client = BybitClient(
     testnet=cfg.secrets.bybit_testnet,
     category=cfg.get("exchange", "category", default="linear"),
 )
+
+# The stress test needs a kline fetch per symbol, and the dashboard auto-refreshes
+# every 20s -- cache it for a few minutes so viewing the dashboard doesn't hammer
+# Bybit's API on every refresh.
+_STRESS_CACHE_TTL_SEC = 300
+_stress_cache = {"ts": 0.0, "data": None}
+
+
+def _get_stress_test(equity: float) -> dict | None:
+    now = time.time()
+    if _stress_cache["data"] is None or now - _stress_cache["ts"] > _STRESS_CACHE_TTL_SEC:
+        try:
+            _stress_cache["data"] = stress_test.compute_worst_case(client, cfg, equity)
+            _stress_cache["ts"] = now
+        except Exception:
+            return _stress_cache["data"]
+    return _stress_cache["data"]
 
 TEMPLATE = """
 <!doctype html>
@@ -87,6 +105,66 @@ TEMPLATE = """
     <div class="small">현재 열린 포지션 없음 - 진입 신호 대기 중</div>
     {% endif %}
   </div>
+
+  {% if stress %}
+  <div class="card">
+    <h2 style="font-size:1rem;">리스크 스트레스 테스트 (전종목 동시 손절 가정)</h2>
+    <table>
+      <tr><th>심볼</th><th>레버리지</th><th>손절폭</th><th>손실(자산 대비)</th></tr>
+      {% for s in stress.per_symbol %}
+      <tr>
+        <td>{{ s.symbol }}</td>
+        {% if s.error %}
+        <td colspan="3" class="small">조회 실패: {{ s.error }}</td>
+        {% else %}
+        <td>{{ s.leverage }}x</td>
+        <td>{{ '%.2f'|format(s.sl_distance_pct) }}%</td>
+        <td>{{ '%.2f'|format(s.loss_pct_of_equity) }}%</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </table>
+    <div style="margin-top:8px;" class="{{ 'pnl-neg' if stress.exceeds_daily_loss_limit else 'pnl-pos' }}">
+      합계: 자산의 {{ '%.2f'|format(stress.worst_case_total_loss_pct) }}%
+      (~{{ '%.2f'|format(stress.worst_case_total_loss_usdt) }} USDT)
+      / 일일 손실 한도 {{ stress.max_daily_loss_pct }}%
+      {% if stress.exceeds_daily_loss_limit %} — 한도 초과 가능{% endif %}
+    </div>
+    <div class="small">전종목이 목표 증거금%·최대 레버리지로 동시에 진입해 있다가 전부 손절될 경우를 가정한 수치입니다 (실제 마진 버퍼 정책으로 실제 배분은 이보다 작을 수 있음). 5분마다 갱신됩니다.</div>
+  </div>
+  {% endif %}
+
+  {% if perf.overall.count > 0 %}
+  <div class="card">
+    <h2 style="font-size:1rem;">성과 리뷰 (예측 정확도)</h2>
+    <div class="grid">
+      <div><div class="stat-label">전체 거래</div><div class="stat-value">{{ perf.overall.count }}건</div></div>
+      <div><div class="stat-label">승률</div><div class="stat-value">{{ '%.0f'|format(perf.overall.win_rate * 100) }}%</div></div>
+      <div><div class="stat-label">누적 손익</div><div class="stat-value {{ 'pnl-pos' if perf.overall.total_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(perf.overall.total_pnl) }}</div></div>
+    </div>
+    <table style="margin-top:8px;">
+      <tr><th>구분</th><th>거래수</th><th>승률</th><th>누적손익</th></tr>
+      <tr>
+        <td>추세추종</td><td>{{ perf.by_type.trend.count }}</td>
+        <td>{{ '%.0f'|format(perf.by_type.trend.win_rate * 100) if perf.by_type.trend.win_rate is not none else '-' }}{{ '%' if perf.by_type.trend.win_rate is not none }}</td>
+        <td>{{ '%.4f'|format(perf.by_type.trend.total_pnl) }}</td>
+      </tr>
+      <tr>
+        <td>레인지 단타</td><td>{{ perf.by_type.range.count }}</td>
+        <td>{{ '%.0f'|format(perf.by_type.range.win_rate * 100) if perf.by_type.range.win_rate is not none else '-' }}{{ '%' if perf.by_type.range.win_rate is not none }}</td>
+        <td>{{ '%.4f'|format(perf.by_type.range.total_pnl) }}</td>
+      </tr>
+      {% for label, s in perf.by_confidence.items() %}
+      <tr>
+        <td>신뢰도 {{ label }}</td><td>{{ s.count }}</td>
+        <td>{{ '%.0f'|format(s.win_rate * 100) }}%</td>
+        <td>{{ '%.4f'|format(s.total_pnl) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    <div class="small">decisions.jsonl의 진입/청산 기록을 짝지어 계산합니다 (재배포로 로그가 초기화되면 리셋됩니다).</div>
+  </div>
+  {% endif %}
 
   <div class="card">
     <h2 style="font-size:1rem;">최근 판단 로그</h2>
@@ -159,7 +237,8 @@ def index():
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized})
 
-    decisions_raw = read_recent_decisions(os.getenv("LOG_DIR", "logs"), limit=30)
+    log_dir = os.getenv("LOG_DIR", "logs")
+    decisions_raw = read_recent_decisions(log_dir, limit=30)
     decisions = []
     for d in decisions_raw:
         decisions.append({
@@ -167,6 +246,9 @@ def index():
             "event": d.get("event", "?"),
             "summary": _decision_summary(d),
         })
+
+    stress = _get_stress_test(equity) if equity > 0 else None
+    perf = compute_performance_summary(log_dir)
 
     return render_template_string(
         TEMPLATE,
@@ -179,6 +261,8 @@ def index():
         max_positions=cfg.get("risk", "max_concurrent_positions", default=1),
         positions=positions,
         decisions=decisions,
+        stress=stress,
+        perf=perf,
     )
 
 

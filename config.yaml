@@ -15,6 +15,12 @@ risk:
   # NOTE: unlike a risk-per-trade-% scheme, the loss if SL is hit is NOT fixed to
   # a set % of equity here -- it depends on leverage and stop-loss distance.
   position_size_pct_of_equity: 25.0
+  # always keep at least this % of equity as an unused margin reserve. A new
+  # position's margin is capped to min(position_size_pct_of_equity% of equity,
+  # remaining headroom under this reserve) -- so it's sized down (or skipped)
+  # instead of the exchange rejecting the order for insufficient available
+  # balance once other positions have already committed margin.
+  margin_buffer_pct: 15.0
   # hard cap on leverage the bot will ever request, regardless of signal confidence.
   # used as the [1, max_leverage] range for any symbol not listed in leverage_by_symbol below.
   max_leverage: 5

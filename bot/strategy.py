@@ -114,15 +114,39 @@ class Strategy:
             return max_leverage
         return max(lev_min, round(lev_min + confidence * (max_leverage - lev_min)))
 
-    def _open(self, symbol: str, side: str, entry_price: float, equity: float,
+    def _used_margin(self) -> float:
+        """Margin already committed to currently open positions (qty*entry_price /
+        leverage, summed), used to enforce the margin-buffer policy below.
+        """
+        total = 0.0
+        for trade in self.state.snapshot().get("trades", {}).values():
+            leverage = trade.get("leverage") or 1
+            total += (trade["qty"] * trade["entry_price"]) / leverage
+        return total
+
+    def _margin_for_new_position(self, equity: float) -> float:
+        """Target margin (position_size_pct_of_equity% of equity), capped so total
+        margin in use never exceeds equity * (1 - margin_buffer_pct/100) -- i.e. a
+        reserve is always kept free rather than every slot targeting its % of
+        *total* equity independently and potentially over-committing.
+        """
+        buffer_pct = self.risk_cfg.get("margin_buffer_pct", 15.0)
+        headroom = equity * (1 - buffer_pct / 100.0) - self._used_margin()
+        target = equity * self.risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0
+        return max(0.0, min(target, headroom))
+
+    def _open(self, symbol: str, side: str, entry_price: float, margin: float,
               leverage: float, atr: float, trade_cfg: dict, extra_trade_fields: dict,
               log_extra: dict, msg_tag: str):
+        if margin <= 0:
+            logger.info("skip entry %s: no margin headroom left (buffer reserved)", symbol)
+            return
+
         inst = self.client.get_instrument_info(symbol)
         prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, atr, trade_cfg)
 
         sizing = position_sizing.compute_qty_fixed_margin(
-            equity=equity,
-            position_pct_of_equity=self.risk_cfg.get("position_size_pct_of_equity", 25.0),
+            margin=margin,
             leverage=leverage,
             entry_price=entry_price,
             qty_step=inst.qty_step,
@@ -163,7 +187,8 @@ class Strategy:
         entry_price = self.client.get_last_price(symbol)
         inst = self.client.get_instrument_info(symbol)
         leverage = self._leverage_for(symbol, inst, signal["confidence"])
-        self._open(symbol, side, entry_price, equity, leverage, signal["atr"], self.trade_cfg,
+        margin = self._margin_for_new_position(equity)
+        self._open(symbol, side, entry_price, margin, leverage, signal["atr"], self.trade_cfg,
                    extra_trade_fields={}, log_extra={"signal": signal},
                    msg_tag=f" conf={signal['confidence']:.2f}")
 
@@ -198,7 +223,8 @@ class Strategy:
         entry_price = self.client.get_last_price(symbol)
         inst = self.client.get_instrument_info(symbol)
         leverage = self._leverage_for(symbol, inst, confidence=None)  # always use the symbol's max
-        self._open(symbol, side, entry_price, equity, leverage, atr, range_cfg,
+        margin = self._margin_for_new_position(equity)
+        self._open(symbol, side, entry_price, margin, leverage, atr, range_cfg,
                    extra_trade_fields={"is_range_trade": True},
                    log_extra={"range_high": range_high, "range_low": range_low},
                    msg_tag=":range")
@@ -213,29 +239,42 @@ class Strategy:
                 log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
                 return
 
-        try:
-            exit_price = self.client.get_last_price(symbol)
-        except BybitAPIError:
-            exit_price = trade["entry_price"]
-
-        if trade["side"] == "long":
-            pnl = (exit_price - trade["entry_price"]) * trade["qty"]
+        # Prefer the exchange's own closed-pnl record: it's net of trading fees and
+        # uses the real average exit fill price, unlike estimating from last price.
+        # It can lag a close by a few seconds, so fall back to a price-based
+        # estimate (fees not included) if there's no record yet or the lookup fails.
+        closed = self.client.get_closed_pnl(symbol)
+        if closed and closed["updated_time_ms"] / 1000.0 >= trade["opened_at"]:
+            pnl = closed["closed_pnl"]
+            exit_price = closed["avg_exit_price"] or trade["entry_price"]
+            pnl_is_estimate = False
         else:
-            pnl = (trade["entry_price"] - exit_price) * trade["qty"]
+            try:
+                exit_price = self.client.get_last_price(symbol)
+            except BybitAPIError:
+                exit_price = trade["entry_price"]
+            if trade["side"] == "long":
+                pnl = (exit_price - trade["entry_price"]) * trade["qty"]
+            else:
+                pnl = (trade["entry_price"] - exit_price) * trade["qty"]
+            pnl_is_estimate = True
+            logger.warning("no exchange closed-pnl record yet for %s, using price-based "
+                            "estimate (fees not included)", symbol)
 
         self.state.add_realized_pnl(pnl)
         self.state.set_trade(symbol, None)
         self.state.record_closed_trade({
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "exit_price": exit_price, "qty": trade["qty"], "pnl": pnl, "reason": reason,
-            "closed_at": time.time(),
+            "pnl_is_estimate": pnl_is_estimate, "closed_at": time.time(),
         })
 
-        msg = f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} PnL={pnl:+.4f} USDT"
+        est_tag = " (est.)" if pnl_is_estimate else ""
+        msg = f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} PnL={pnl:+.4f} USDT{est_tag}"
         logger.info(msg)
         self.notifier.send(msg)
         log_decision(self.log_dir, {"event": "exit", "symbol": symbol, "reason": reason,
-                                     "exit_price": exit_price, "pnl": pnl})
+                                     "exit_price": exit_price, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
 
     def manage_open_position(self, symbol: str):
         trade = self.state.get_trade(symbol)

@@ -63,28 +63,27 @@ def compute_qty(
 
 
 def compute_qty_fixed_margin(
-    equity: float,
-    position_pct_of_equity: float,
+    margin: float,
     leverage: float,
     entry_price: float,
     qty_step: float,
     min_qty: float,
     min_notional: float,
 ) -> SizingResult:
-    """Sizes a position by margin allocation instead of stop-loss risk: this trade
-    always uses `position_pct_of_equity`% of equity as margin, at `leverage`x. Unlike
-    compute_qty, the loss if the stop-loss is hit is NOT held to a fixed % of equity --
-    it depends on leverage and how far away the stop-loss is.
+    """Sizes a position from an explicit margin amount (already the caller's
+    decision -- e.g. min(target %, remaining headroom under a margin-buffer
+    policy) -- at `leverage`x. Unlike compute_qty, the loss if the stop-loss is
+    hit is NOT held to a fixed % of equity -- it depends on leverage and how far
+    away the stop-loss is.
     """
-    if entry_price <= 0 or equity <= 0:
-        return SizingResult(ok=False, reason="invalid equity/entry price")
+    if entry_price <= 0 or margin <= 0:
+        return SizingResult(ok=False, reason="invalid margin/entry price")
 
-    margin = equity * (position_pct_of_equity / 100.0)
     notional = margin * leverage
 
     qty = math.floor(notional / entry_price / qty_step) * qty_step if qty_step > 0 else notional / entry_price
     notional = qty * entry_price
-    leverage_needed = notional / equity if equity > 0 else 0.0
+    leverage_needed = notional / margin if margin > 0 else 0.0
 
     if qty < min_qty:
         return SizingResult(ok=False, qty=qty, notional=notional, leverage_needed=leverage_needed,
