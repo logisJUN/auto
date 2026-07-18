@@ -73,6 +73,7 @@ def _make_strategy(state_path, log_path):
     client.get_equity_usdt.return_value = 1000.0
     client.get_instrument_info.return_value = FakeInst()
     client.round_price.side_effect = lambda symbol, price: round(price, 2)
+    client.round_qty.side_effect = lambda symbol, qty: round(qty, 2)
     client.get_last_price.return_value = 100.0
     client.open_position.return_value = {}
     client.get_position.return_value = None

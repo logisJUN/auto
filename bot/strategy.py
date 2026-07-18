@@ -221,24 +221,33 @@ class Strategy:
             logger.info("skip entry %s: %s", symbol, sizing.reason)
             return
 
+        # compute_qty_fixed_margin's floor-based math can leave floating-point
+        # noise (e.g. 4.1000000000000005) that Bybit rejects outright as an
+        # invalid qty string -- round_qty formats it to the symbol's actual
+        # step precision, same as round_price already does for SL/TP.
+        qty = self.client.round_qty(symbol, sizing.qty)
+        if qty < inst.min_qty:
+            logger.info("skip entry %s: qty %.10g rounds below exchange minimum %.10g", symbol, qty, inst.min_qty)
+            return
+
         try:
             self.client.set_leverage(symbol, leverage)
             sl_price = self.client.round_price(symbol, prospective["initial_sl"])
             tp_price = self.client.round_price(symbol, prospective["initial_tp"])
-            self.client.open_position(symbol, side, sizing.qty, stop_loss=sl_price, take_profit=tp_price)
+            self.client.open_position(symbol, side, qty, stop_loss=sl_price, take_profit=tp_price)
         except BybitAPIError as exc:
             logger.error("failed to open position for %s: %s", symbol, exc)
             log_decision(self.log_dir, {"event": "entry_failed", "symbol": symbol, "error": str(exc)})
             return
 
-        trade = stop_manager.new_trade(symbol, side, entry_price, sizing.qty, atr, trade_cfg)
+        trade = stop_manager.new_trade(symbol, side, entry_price, qty, atr, trade_cfg)
         trade["initial_sl"] = trade["current_sl"] = sl_price
         trade["initial_tp"] = trade["current_tp"] = tp_price
         trade["leverage"] = leverage
         trade.update(extra_trade_fields)
         self.state.set_trade(symbol, trade)
 
-        msg = (f"[진입{msg_tag}] {symbol} {side.upper()} qty={sizing.qty} entry~{entry_price:.4f} "
+        msg = (f"[진입{msg_tag}] {symbol} {side.upper()} qty={qty} entry~{entry_price:.4f} "
                f"SL={sl_price:.4f} TP={tp_price:.4f} lev={leverage}x")
         logger.info(msg)
         self.notifier.send(msg)
@@ -297,7 +306,8 @@ class Strategy:
     def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
         if not already_closed:
             try:
-                self.client.close_position(symbol, trade["side"], trade["qty"])
+                close_qty = self.client.round_qty(symbol, trade["qty"])
+                self.client.close_position(symbol, trade["side"], close_qty)
             except BybitAPIError as exc:
                 logger.error("failed to close %s: %s", symbol, exc)
                 log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
