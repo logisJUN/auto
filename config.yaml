@@ -5,7 +5,18 @@
 
 exchange:
   category: "linear"          # USDT perpetual futures
-  symbols: ["ETHUSDT", "SOXLUSDT", "SNXXUSDT", "SPCXUSDT"]
+  # Always-watched symbols, regardless of the dynamic universe scan below.
+  symbols: ["ETHUSDT"]
+  # Instead of (or in addition to) a hand-picked symbol list, periodically scan
+  # every Bybit USDT linear perpetual and watch whichever ones currently have
+  # the highest 24h turnover (liquidity) -- one cheap bulk ticker call, not a
+  # kline fetch per candidate. A position that's open when its symbol falls out
+  # of the refreshed list keeps being managed (SL/TP/trailing/stale-timeout)
+  # until it closes -- it's just not eligible for new entries anymore.
+  universe:
+    enabled: true
+    top_n: 30
+    rescan_interval_hours: 1
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
@@ -36,17 +47,17 @@ risk:
     # least this much (not just be marginally better).
     min_confidence_margin_over_weakest: 0.15
   # hard cap on leverage the bot will ever request, regardless of signal confidence.
-  # used as the [1, max_leverage] range for any symbol not listed in leverage_by_symbol below.
+  # only used as a fallback if default_leverage_range below is missing entirely.
   max_leverage: 5
   # per-symbol leverage range [min, max]. Actual leverage used for a trade is
   # interpolated within this range based on signal confidence (low confidence ->
   # min, high confidence -> max), then capped by the exchange's own max leverage
   # for that symbol/margin tier.
   leverage_by_symbol:
-    ETHUSDT: {min: 5, max: 10}
-    SOXLUSDT: {min: 4, max: 8}
-    SNXXUSDT: {min: 6, max: 10}
-    SPCXUSDT: {min: 7, max: 10}
+    ETHUSDT: {min: 8, max: 10}
+  # leverage range for any symbol NOT listed in leverage_by_symbol above -- i.e.
+  # everything picked up by the dynamic universe scan.
+  default_leverage_range: {min: 5, max: 8}
   # bot stops opening new trades for the day once realized loss hits this % of
   # the equity it had at the start of the day (UTC).
   max_daily_loss_pct: 8.0

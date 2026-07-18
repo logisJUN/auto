@@ -53,6 +53,15 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
 
 ## 매매 로직 요약
 
+0. **감시 종목 구성 (`exchange.universe`, 기본 1시간마다 재스캔)**: 종목을 직접
+   고르지 않고, Bybit의 **모든 USDT 무기한선물 티커를 한 번의 가벼운 API 호출**로
+   받아서 **24시간 거래대금 상위 `top_n`개**(기본 30개)를 감시 목록으로 자동 구성합니다.
+   `exchange.symbols`(기본 `["ETHUSDT"]`)는 스캔 결과와 무관하게 **항상 고정 포함**되는
+   종목입니다. 이미 포지션이 열려있는 종목은 다음 스캔에서 목록에서 빠지더라도
+   **청산될 때까지 계속 관리**됩니다(SL/TP/트레일링/정체청산 등) — 감시 목록에서
+   빠지는 건 "새 진입 후보에서 제외"라는 뜻이지 "관리 중단"이 아닙니다.
+   `exchange.universe.enabled: false`로 끄면 예전처럼 `exchange.symbols`에 적은
+   종목만 고정으로 거래합니다.
 1. **신호 수집 (2분마다 재계산, 캐시됨)**
    - 기술적 분석: 15분/1시간/4시간봉의 EMA 추세, RSI 모멘텀, MACD, 볼린저밴드 위치를
      ATR로 정규화해 종목별 스코어(-1~1)로 환산. 긴 시간프레임일수록 더 큰 가중치.
@@ -66,8 +75,9 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
 2. **진입 조건**: 동시보유 한도/일일 손실 한도를 넘지 않는 상태에서, 두 갈래로 나뉩니다.
    - **추세추종**: 종합 신호 방향이 중립이 아니고 신뢰도가 `risk.min_confidence_to_enter`
      (기본 0.55) 이상이면 그 방향으로 진입. 신뢰도가 높을수록 레버리지를
-     `risk.leverage_by_symbol[종목].max` 쪽으로, 낮을수록 `.min` 쪽으로 사용 (종목별로
-     다른 범위 설정 가능, 목록에 없는 종목은 `[1, risk.max_leverage]` 범위 사용).
+     `risk.leverage_by_symbol[종목].max` 쪽으로, 낮을수록 `.min` 쪽으로 사용. 목록에
+     없는 종목(동적 유니버스로 새로 들어온 코인 등)은 `risk.default_leverage_range`
+     (기본 5~8배) 사용.
    - **레인지(횡보) 역추세 단타**: 종합 신호가 **중립(neutral)일 때만** 시도. 최근
      `signals.technical.range_lookback`(기본 20)개 봉의 고점/저점을 구해서, 그 폭이
      `range_trade.max_range_width_atr_mult`×ATR(기본 4배) 이내일 때만 "진짜 횡보"로
@@ -319,11 +329,13 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 
 | 항목 | 의미 |
 |---|---|
-| `exchange.symbols` | 매매할 종목 목록 |
+| `exchange.symbols` | 항상 고정으로 감시할 종목 목록 (동적 유니버스와 무관하게 항상 포함) |
+| `exchange.universe.*` | 동적 종목 스캔 (`enabled`, `top_n`, `rescan_interval_hours`) — 켜져 있으면 Bybit 전종목을 24시간 거래대금 기준으로 스캔해서 상위 `top_n`개를 `exchange.symbols`와 합쳐 감시 |
 | `risk.position_size_pct_of_equity` | 포지션당 증거금으로 쓸 자산 비율 (여기에 레버리지를 곱한 게 명목 포지션 크기) |
 | `risk.margin_buffer_pct` | 항상 비워둘 증거금 비율. 다른 포지션이 이미 많이 썼으면 새 진입 증거금을 이만큼 남기고 깎음 |
-| `risk.max_leverage` | `leverage_by_symbol`에 없는 종목의 레버리지 상한 (하한은 1) |
-| `risk.leverage_by_symbol` | 종목별 `{min, max}` 레버리지 범위. 신뢰도에 따라 그 범위 내에서 보간 |
+| `risk.max_leverage` | `default_leverage_range`가 아예 없을 때만 쓰이는 최종 폴백 상한 |
+| `risk.leverage_by_symbol` | 개별 지정한 종목별 `{min, max}` 레버리지 범위. 신뢰도에 따라 그 범위 내에서 보간 |
+| `risk.default_leverage_range` | `leverage_by_symbol`에 없는 모든 종목(동적 유니버스로 들어온 코인 포함)의 `{min, max}` 레버리지 범위 |
 | `risk.max_concurrent_positions` | 동시에 보유 가능한 포지션(종목) 최대 개수 |
 | `risk.override_entry.*` | 슬롯/증거금이 꽉 찼을 때, 아주 강한 새 신호가 오면 가장 약한 기존 포지션을 청산하고 교체 진입할지 (`enabled`, `min_confidence`, `min_confidence_margin_over_weakest`) |
 | `risk.max_daily_loss_pct` | 이 손실률에 도달하면 당일 신규 진입 중단 |

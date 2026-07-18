@@ -12,7 +12,7 @@ from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import log_decision
 from bot.notify import Notifier
 from bot.risk import position_sizing, stop_manager
-from bot.signals import aggregator, technical
+from bot.signals import aggregator, technical, universe
 from bot.signals.news import NewsSignal
 from bot.signals.polymarket import PolymarketSignal
 from bot.state import StateStore
@@ -34,7 +34,11 @@ class Strategy:
         self.notifier = notifier
         self.log_dir = log_dir
 
-        self.symbols: list[str] = cfg.get("exchange", "symbols", default=["BTCUSDT"])
+        self._pinned_symbols: list[str] = list(cfg.get("exchange", "symbols", default=["BTCUSDT"]))
+        self.universe_cfg: dict = cfg.get("exchange", "universe", default={})
+        self.symbols: list[str] = list(self._pinned_symbols)
+        self._last_universe_scan = 0.0
+
         self.risk_cfg: dict = cfg.get("risk", default={})
         self.signals_cfg: dict = cfg.get("signals", default={})
         self.trade_cfg: dict = cfg.get("trade_management", default={})
@@ -159,7 +163,13 @@ class Strategy:
         return self.client.get_equity_usdt()  # refresh -- the close just realized PnL
 
     def _leverage_for(self, symbol: str, inst, confidence: float | None) -> float:
-        lev_range = self.risk_cfg.get("leverage_by_symbol", {}).get(symbol, {})
+        lev_range = self.risk_cfg.get("leverage_by_symbol", {}).get(symbol)
+        if lev_range is None:
+            # not individually configured -- e.g. picked up by the dynamic
+            # universe scan -- so use the catch-all range instead.
+            lev_range = self.risk_cfg.get(
+                "default_leverage_range", {"min": 1, "max": self.risk_cfg.get("max_leverage", 5)}
+            )
         lev_min = lev_range.get("min", 1)
         lev_max = lev_range.get("max", self.risk_cfg.get("max_leverage", 5))
         max_leverage = min(lev_max, inst.max_leverage)
@@ -386,8 +396,41 @@ class Strategy:
             self.state.set_trade(symbol, trade)
 
     # -- one full tick over all symbols ---------------------------------------------------------
+    def _refresh_universe(self):
+        """Re-screens the tradable universe by 24h turnover on its own cadence
+        (universe.rescan_interval_hours). A symbol whose position is currently
+        open is managed until it closes regardless of whether it's still in the
+        refreshed watchlist -- this only changes what's eligible for new entries.
+        """
+        if not self.universe_cfg.get("enabled", False):
+            return
+        now = time.time()
+        interval_sec = self.universe_cfg.get("rescan_interval_hours", 1) * 3600
+        if self._last_universe_scan and now - self._last_universe_scan < interval_sec:
+            return
+
+        try:
+            top_n = self.universe_cfg.get("top_n", 30)
+            screened = universe.screen_top_symbols(self.client, quote_suffix="USDT", top_n=top_n)
+        except Exception:
+            logger.exception("universe screening failed -- keeping current watchlist")
+            self._last_universe_scan = now  # don't retry every single tick on a persistent error
+            return
+
+        merged = list(dict.fromkeys(self._pinned_symbols + screened))
+        added = sorted(set(merged) - set(self.symbols))
+        dropped = sorted(set(self.symbols) - set(merged))
+        self.symbols = merged
+        self._last_universe_scan = now
+        logger.info("universe refreshed: %d symbols (added=%s, dropped=%s)", len(merged), added, dropped)
+
     def tick(self):
-        for symbol in self.symbols:
+        self._refresh_universe()
+
+        open_symbols = set(self.state.snapshot().get("trades", {}).keys())
+        symbols_to_check = list(dict.fromkeys(self.symbols + list(open_symbols)))
+
+        for symbol in symbols_to_check:
             try:
                 if self.state.get_trade(symbol) is not None:
                     self.manage_open_position(symbol)

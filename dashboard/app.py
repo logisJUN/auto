@@ -35,11 +35,16 @@ _STRESS_CACHE_TTL_SEC = 300
 _stress_cache = {"ts": 0.0, "data": None}
 
 
-def _get_stress_test(equity: float) -> dict | None:
+def _get_stress_test(equity: float, open_symbols: list[str]) -> dict | None:
     now = time.time()
     if _stress_cache["data"] is None or now - _stress_cache["ts"] > _STRESS_CACHE_TTL_SEC:
+        # With the dynamic universe scan on, exchange.symbols is just the pinned
+        # list -- test that plus whatever's actually open, not all ~30 scanned
+        # symbols (that would mean a kline fetch per symbol on every cache miss).
+        pinned = cfg.get("exchange", "symbols", default=[])
+        symbols = list(dict.fromkeys(list(pinned) + list(open_symbols)))
         try:
-            _stress_cache["data"] = stress_test.compute_worst_case(client, cfg, equity)
+            _stress_cache["data"] = stress_test.compute_worst_case(client, cfg, equity, symbols=symbols)
             _stress_cache["ts"] = now
         except Exception:
             return _stress_cache["data"]
@@ -247,7 +252,7 @@ def index():
             "summary": _decision_summary(d),
         })
 
-    stress = _get_stress_test(equity) if equity > 0 else None
+    stress = _get_stress_test(equity, list(snapshot.get("trades", {}).keys())) if equity > 0 else None
     perf = compute_performance_summary(log_dir)
 
     return render_template_string(

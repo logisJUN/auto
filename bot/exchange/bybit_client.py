@@ -93,6 +93,15 @@ class BybitClient:
             raise BybitAPIError(f"no ticker data for {symbol}")
         return float(lst[0]["lastPrice"])
 
+    def get_all_tickers(self) -> list[dict]:
+        """Returns Bybit's raw ticker list for every symbol in this client's
+        category (no symbol filter) -- one cheap call used to rank/screen the
+        whole tradable universe (e.g. by 24h turnover) instead of fetching
+        candles for every symbol individually.
+        """
+        result = self._call(self.session.get_tickers, category=self.category)
+        return result.get("list", [])
+
     def get_instrument_info(self, symbol: str) -> InstrumentInfo:
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]

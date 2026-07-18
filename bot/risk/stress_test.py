@@ -12,22 +12,29 @@ from __future__ import annotations
 from bot.signals import technical
 
 
-def compute_worst_case(client, cfg, equity: float) -> dict:
+def compute_worst_case(client, cfg, equity: float, symbols: list[str] | None = None) -> dict:
+    """`symbols` defaults to exchange.symbols (the pinned list) if not given --
+    pass the caller's own list (e.g. pinned + currently-open) when the tradable
+    universe is dynamic, since testing all ~30 scanned symbols here would mean
+    a kline fetch per symbol just for a dashboard card.
+    """
     risk_cfg = cfg.get("risk", default={})
     trade_cfg = cfg.get("trade_management", default={})
     tech_cfg = cfg.get("signals", "technical", default={})
-    symbols = cfg.get("exchange", "symbols", default=[])
+    if symbols is None:
+        symbols = cfg.get("exchange", "symbols", default=[])
 
     exec_tf = tech_cfg.get("timeframes", ["15", "60", "240"])[0]
     atr_period = tech_cfg.get("atr_period", 14)
     kline_limit = tech_cfg.get("kline_limit", 200)
     margin_pct = risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0
     sl_mult = trade_cfg.get("atr_sl_multiplier", 1.5)
+    default_lev_range = risk_cfg.get("default_leverage_range", {"min": 1, "max": risk_cfg.get("max_leverage", 5)})
 
     per_symbol = []
     total_loss_pct = 0.0
     for symbol in symbols:
-        lev_range = risk_cfg.get("leverage_by_symbol", {}).get(symbol, {})
+        lev_range = risk_cfg.get("leverage_by_symbol", {}).get(symbol, default_lev_range)
         leverage = lev_range.get("max", risk_cfg.get("max_leverage", 5))
 
         try:
