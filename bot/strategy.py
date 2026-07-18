@@ -87,8 +87,6 @@ class Strategy:
     def try_enter(self, symbol: str):
         if self.state.get_trade(symbol) is not None:
             return
-        if self.state.open_trade_count() >= self.risk_cfg.get("max_concurrent_positions", 1):
-            return
         equity = self.client.get_equity_usdt()
         self.state.ensure_daily(equity)
         if self._daily_loss_breached():
@@ -99,10 +97,66 @@ class Strategy:
             return
 
         min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
-        if signal["direction"] != "neutral" and signal["confidence"] >= min_conf:
+        is_trend_candidate = signal["direction"] != "neutral" and signal["confidence"] >= min_conf
+
+        # "No room" means either every slot is used, or -- more commonly at a high
+        # position_size_pct_of_equity + margin_buffer_pct combo -- there's simply no
+        # margin headroom left even though a slot count is technically free.
+        slots_full = self.state.open_trade_count() >= self.risk_cfg.get("max_concurrent_positions", 1)
+        no_margin_room = self._margin_for_new_position(equity) <= 0
+        if slots_full or no_margin_room:
+            equity = self._make_room_for_override(symbol, signal, is_trend_candidate, equity)
+            if equity is None:
+                return  # no override -- stay on the sidelines this tick
+
+        if is_trend_candidate:
             self._enter_trend(symbol, signal, equity)
         elif signal["direction"] == "neutral":
             self._enter_range(symbol, signal, equity)
+
+    def _current_confidence_of_open(self, symbol: str, trade: dict) -> float:
+        """Confidence of the position's own direction, from its *current* cached
+        signal (not the confidence at entry time). A signal that has faded to
+        neutral or reversed against the position scores lowest, since that
+        position's original thesis no longer holds.
+        """
+        signal = self.get_signal(symbol)
+        if signal["direction"] == trade["side"]:
+            return signal["confidence"]
+        if signal["direction"] == "neutral":
+            return 0.0
+        return -1.0  # signal has reversed against this position
+
+    def _make_room_for_override(self, symbol: str, signal: dict, is_trend_candidate: bool,
+                                 equity: float) -> float | None:
+        """All slots are full. If `symbol`'s signal is a strong enough trend
+        candidate, and it clearly beats the weakest currently-held position's
+        *current* conviction, close that weakest position and free its slot/margin
+        for this one. Returns refreshed equity to enter with, or None to skip.
+        """
+        override_cfg = self.risk_cfg.get("override_entry", {})
+        if not override_cfg.get("enabled", False) or not is_trend_candidate:
+            return None
+        if signal["confidence"] < override_cfg.get("min_confidence", 0.85):
+            return None
+
+        trades = self.state.snapshot().get("trades", {})
+        weakest_symbol, weakest_trade, weakest_conf = None, None, None
+        for open_symbol, trade in trades.items():
+            conf = self._current_confidence_of_open(open_symbol, trade)
+            if weakest_conf is None or conf < weakest_conf:
+                weakest_symbol, weakest_trade, weakest_conf = open_symbol, trade, conf
+        if weakest_symbol is None:
+            return None
+
+        margin = override_cfg.get("min_confidence_margin_over_weakest", 0.15)
+        if signal["confidence"] - weakest_conf < margin:
+            return None
+
+        logger.info("[교체진입] %s(conf=%.2f)가 기존 %s(conf=%.2f)보다 강해 교체합니다",
+                     symbol, signal["confidence"], weakest_symbol, weakest_conf)
+        self._close_and_settle(weakest_symbol, weakest_trade, "override_reallocation")
+        return self.client.get_equity_usdt()  # refresh -- the close just realized PnL
 
     def _leverage_for(self, symbol: str, inst, confidence: float | None) -> float:
         lev_range = self.risk_cfg.get("leverage_by_symbol", {}).get(symbol, {})
