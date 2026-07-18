@@ -51,6 +51,9 @@ signals:
     ema_slow: 26
     atr_period: 14
     kline_limit: 200
+    # candles (on the shortest configured timeframe) used to find the recent
+    # trading-range high/low for range_trade below.
+    range_lookback: 20
   news:
     feeds:
       - "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -88,6 +91,24 @@ trade_management:
   # this magnitude opposite to position side) with decent confidence, exit early.
   reversal_exit_score: 0.4
   reversal_exit_confidence: 0.6
+  # "give up" exit: if a position has been open at least this long AND price is
+  # still within stale_exit_max_move_pct of entry, close it (profit or loss) and
+  # free the slot for a fresh signal on another symbol. 0 disables this check.
+  stale_exit_after_min: 60
+  stale_exit_max_move_pct: 0.5
+
+  # Range/mean-reversion scalp entries, only tried when the trend signal
+  # (technical+news+polymarket) is neutral. Enter long near the recent range
+  # low / short near the recent range high, at the symbol's max configured
+  # leverage, for a quick scalp -- no trailing or TP-extension, exits only via
+  # its own (tight) SL/TP plus the shared flash-move/reversal/stale-timeout checks.
+  range_trade:
+    enabled: true
+    # how close to the range high/low (in ATR) counts as "at the edge".
+    edge_atr_mult: 0.5
+    # tighter SL/TP than trend trades -- this is meant to be a quick scalp.
+    atr_sl_multiplier: 1.0
+    atr_tp_multiplier: 1.0
 
 loop:
   fast_poll_sec: 8          # price/emergency-exit checks while a position is open

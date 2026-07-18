@@ -89,6 +89,27 @@ def check_signal_reversal(trade: dict, agg_signal: dict, cfg: dict) -> bool:
     return False
 
 
+def check_stale_position(trade: dict, current_price: float, cfg: dict) -> bool:
+    """True if the trade has been open long enough (stale_exit_after_min) and price
+    has barely moved from entry since (stale_exit_max_move_pct) -- i.e. it's going
+    nowhere. Applies regardless of whether the trade is currently up or down, so a
+    stuck position gives up its slot for a fresh signal on another symbol instead of
+    sitting there indefinitely.
+    """
+    timeout_min = cfg.get("stale_exit_after_min", 0)
+    if timeout_min <= 0:
+        return False
+    if time.time() - trade["opened_at"] < timeout_min * 60:
+        return False
+
+    entry = trade["entry_price"]
+    if entry <= 0:
+        return False
+    max_move_pct = cfg.get("stale_exit_max_move_pct", 0.5)
+    moved_pct = abs(current_price - entry) / entry * 100.0
+    return moved_pct <= max_move_pct
+
+
 def _profit_r(trade: dict, current_price: float) -> float:
     r = trade["risk_distance"]
     if r <= 0:

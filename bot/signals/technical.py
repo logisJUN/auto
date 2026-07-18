@@ -95,6 +95,17 @@ def score_timeframe(candles: list[dict], cfg: dict) -> dict:
     }
 
 
+def range_levels(candles: list[dict], lookback: int = 20) -> dict:
+    """Rolling high/low over the last `lookback` candles, used to spot a trading
+    range for mean-reversion entries when the trend signal is neutral.
+    """
+    df = to_dataframe(candles)
+    if len(df) < lookback:
+        return {"range_high": 0.0, "range_low": 0.0}
+    recent = df.tail(lookback)
+    return {"range_high": float(recent["high"].max()), "range_low": float(recent["low"].min())}
+
+
 def volume_score(candles: list[dict], lookback: int = 20) -> float:
     """Relative volume + whether recent volume is confirming the price direction."""
     df = to_dataframe(candles)
@@ -136,11 +147,15 @@ def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[
     exec_close = per_tf.get(exec_tf, {}).get("close", 0.0) if exec_tf else 0.0
 
     vol_score = volume_score(klines_by_tf.get(exec_tf, [])) if exec_tf else 0.0
+    range_info = range_levels(klines_by_tf.get(exec_tf, []), cfg.get("range_lookback", 20)) if exec_tf else \
+        {"range_high": 0.0, "range_low": 0.0}
 
     return {
         "score": _clip(combined),
         "atr": exec_atr,
         "close": exec_close,
         "volume_score": vol_score,
+        "range_high": range_info["range_high"],
+        "range_low": range_info["range_low"],
         "per_tf": per_tf,
     }

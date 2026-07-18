@@ -47,3 +47,18 @@ def test_volume_score_amplifies_direction_on_spike():
     candles[-1]["volume"] = 1000  # spike on the up-move
     score = technical.volume_score(candles)
     assert score > 0
+
+
+def test_range_levels_picks_high_low_over_lookback():
+    prices = [100, 105, 95, 102, 98, 101, 99, 100]
+    candles = _make_candles(prices)
+    result = technical.range_levels(candles, lookback=len(prices))
+    assert result["range_high"] == max(p * 1.001 for p in prices)
+    assert result["range_low"] == min(p * 0.999 for p in prices)
+
+
+def test_range_levels_insufficient_data_returns_zero():
+    candles = _make_candles([100, 101])
+    result = technical.range_levels(candles, lookback=20)
+    assert result["range_high"] == 0.0
+    assert result["range_low"] == 0.0

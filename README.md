@@ -62,11 +62,16 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      갱신 대비 확률 변화(모멘텀)를 방향성 힌트로 사용.
    - 위 4개를 `config.yaml`의 `signals.weights`로 가중 평균. 뉴스/폴리마켓은 관련
      데이터가 적으면(신뢰도 낮음) 자동으로 영향력이 줄어듭니다.
-2. **진입 조건**: 종합 신호의 방향이 중립이 아니고, 신뢰도가
-   `risk.min_confidence_to_enter`(기본 0.55) 이상이며, 동시보유 한도/일일 손실 한도를
-   넘지 않을 때만 진입. 신뢰도가 높을수록 레버리지를 `risk.leverage_by_symbol[종목].max`
-   쪽으로, 낮을수록 `.min` 쪽으로 사용 (종목별로 다른 범위 설정 가능, 목록에 없는
-   종목은 `[1, risk.max_leverage]` 범위 사용).
+2. **진입 조건**: 동시보유 한도/일일 손실 한도를 넘지 않는 상태에서, 두 갈래로 나뉩니다.
+   - **추세추종**: 종합 신호 방향이 중립이 아니고 신뢰도가 `risk.min_confidence_to_enter`
+     (기본 0.55) 이상이면 그 방향으로 진입. 신뢰도가 높을수록 레버리지를
+     `risk.leverage_by_symbol[종목].max` 쪽으로, 낮을수록 `.min` 쪽으로 사용 (종목별로
+     다른 범위 설정 가능, 목록에 없는 종목은 `[1, risk.max_leverage]` 범위 사용).
+   - **레인지(횡보) 역추세 단타**: 종합 신호가 **중립(neutral)일 때만** 시도. 최근
+     `signals.technical.range_lookback`(기본 20)개 봉의 고점/저점을 구해서, 현재가가
+     저점 근처(`range_trade.edge_atr_mult`×ATR 이내)면 롱, 고점 근처면 숏으로 진입.
+     레버리지는 신뢰도와 무관하게 항상 그 종목의 `leverage_by_symbol[종목].max` 사용.
+     추세추종 진입과는 겹치지 않도록 상호 배타적으로 동작합니다.
 3. **포지션 사이징**: **계좌 자산의 `risk.position_size_pct_of_equity`(기본 25%)를
    증거금으로 쓰고, 거기에 레버리지를 곱한 명목 크기**로 수량을 계산합니다
    (예: 자산 1000 USDT, 25%, 레버리지 10배 → 명목 2500 USDT 포지션). 손절 시 손실액은
@@ -86,6 +91,13 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      (최대 `max_tp_extensions`회, 기본 3회 - 무한정 안 먹고 버티지 않도록 제한)
    - **신호 반전 조기청산**: 신호가 포지션 반대 방향으로 강하게(스코어/신뢰도 모두 기준
      이상) 바뀌면 익절/손절 전이라도 조기 청산.
+   - **정체(횡보) 포기 청산**: 포지션이 `stale_exit_after_min`(기본 60분) 이상 열려있는데
+     그 사이 가격이 진입가 대비 `stale_exit_max_move_pct`(기본 0.5%) 이내에서만 움직였으면,
+     손익 부호와 상관없이(플러스든 마이너스든) 시장가로 정리하고 그 슬롯을 비웁니다.
+     `stale_exit_after_min: 0`으로 두면 이 체크 자체를 끌 수 있습니다.
+   - **레인지 트레이드는 트레일링/TP연장을 타지 않습니다**: 손익분기/트레일링/TP연장은
+     추세추종 진입에만 적용되고, 레인지 진입은 위 급락탈출/신호반전/정체청산과 자기 자신의
+     (좁은) SL/TP로만 종료됩니다 — 원래 "단타"로 설계된 진입이라 더 오래 들고 가지 않습니다.
    - 실제 SL/TP는 항상 Bybit 거래소 서버에 주문으로 걸려 있으므로, 봇 프로세스가
      잠깐 멈춰도 거래소가 손절/익절을 대신 집행합니다.
 6. **일일 손실 한도**: 하루(UTC 기준) 실현손실이 `risk.max_daily_loss_pct`(기본 8%)를
@@ -280,7 +292,10 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 | `risk.max_daily_loss_pct` | 이 손실률에 도달하면 당일 신규 진입 중단 |
 | `risk.min_confidence_to_enter` | 이 신뢰도 미만이면 진입 안 함 (높일수록 거래 빈도↓ 확신도↑) |
 | `signals.weights` | 기술적/거래량/뉴스/폴리마켓 각 신호의 반영 비중 |
+| `signals.technical.range_lookback` | 레인지 고점/저점을 구할 때 볼 최근 봉 개수 |
 | `trade_management.*` | 손절/익절/트레일링/TP연장/긴급탈출 세부 파라미터 |
+| `trade_management.stale_exit_after_min` / `stale_exit_max_move_pct` | 이 시간 이상 열려있는데 가격이 이 %만큼도 안 움직였으면(횡보) 손익 무관 정리. 0으로 끄기 가능 |
+| `trade_management.range_trade.*` | 신호 중립일 때만 시도하는 레인지 역추세 단타 진입의 세부 파라미터 (`enabled`, `edge_atr_mult`, 자체 `atr_sl_multiplier`/`atr_tp_multiplier`) |
 | `loop.fast_poll_sec` / `idle_poll_sec` | 포지션 보유 중 / 미보유 시 확인 주기 |
 
 ---

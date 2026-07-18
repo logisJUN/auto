@@ -1,3 +1,5 @@
+import time
+
 from bot.risk import stop_manager
 
 CFG = {
@@ -13,6 +15,8 @@ CFG = {
     "reversal_exit_score": 0.4,
     "reversal_exit_confidence": 0.6,
     "min_confidence_to_enter": 0.55,
+    "stale_exit_after_min": 60,
+    "stale_exit_max_move_pct": 0.5,
 }
 
 
@@ -83,3 +87,28 @@ def test_signal_reversal_ignored_when_confidence_too_low():
     trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
     weak_bearish = {"direction": "short", "score": -0.5, "confidence": 0.3}
     assert not stop_manager.check_signal_reversal(trade, weak_bearish, CFG)
+
+
+def test_stale_position_triggers_after_timeout_with_no_movement():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 61 * 60  # opened 61 minutes ago
+    assert stop_manager.check_stale_position(trade, current_price=100.3, cfg=CFG)  # 0.3% move
+
+
+def test_stale_position_not_triggered_before_timeout():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 10 * 60  # only 10 minutes ago
+    assert not stop_manager.check_stale_position(trade, current_price=100.1, cfg=CFG)
+
+
+def test_stale_position_not_triggered_if_price_actually_moved():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 61 * 60
+    assert not stop_manager.check_stale_position(trade, current_price=102.0, cfg=CFG)  # 2% move
+
+
+def test_stale_position_disabled_when_timeout_is_zero():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 1000 * 60
+    cfg = {**CFG, "stale_exit_after_min": 0}
+    assert not stop_manager.check_stale_position(trade, current_price=100.0, cfg=cfg)

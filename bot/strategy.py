@@ -95,23 +95,30 @@ class Strategy:
             return
 
         signal = self.get_signal(symbol)
-        min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
-        if signal["direction"] == "neutral" or signal["confidence"] < min_conf:
-            return
         if signal["atr"] <= 0 or signal["close"] <= 0:
             return
 
-        side = signal["direction"]
-        entry_price = self.client.get_last_price(symbol)
-        prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, signal["atr"], self.trade_cfg)
+        min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
+        if signal["direction"] != "neutral" and signal["confidence"] >= min_conf:
+            self._enter_trend(symbol, signal, equity)
+        elif signal["direction"] == "neutral":
+            self._enter_range(symbol, signal, equity)
 
-        inst = self.client.get_instrument_info(symbol)
+    def _leverage_for(self, symbol: str, inst, confidence: float | None) -> float:
         lev_range = self.risk_cfg.get("leverage_by_symbol", {}).get(symbol, {})
         lev_min = lev_range.get("min", 1)
         lev_max = lev_range.get("max", self.risk_cfg.get("max_leverage", 5))
         max_leverage = min(lev_max, inst.max_leverage)
         lev_min = min(lev_min, max_leverage)
-        leverage = max(lev_min, round(lev_min + signal["confidence"] * (max_leverage - lev_min)))
+        if confidence is None:
+            return max_leverage
+        return max(lev_min, round(lev_min + confidence * (max_leverage - lev_min)))
+
+    def _open(self, symbol: str, side: str, entry_price: float, equity: float,
+              leverage: float, atr: float, trade_cfg: dict, extra_trade_fields: dict,
+              log_extra: dict, msg_tag: str):
+        inst = self.client.get_instrument_info(symbol)
+        prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, atr, trade_cfg)
 
         sizing = position_sizing.compute_qty_fixed_margin(
             equity=equity,
@@ -136,19 +143,57 @@ class Strategy:
             log_decision(self.log_dir, {"event": "entry_failed", "symbol": symbol, "error": str(exc)})
             return
 
-        trade = stop_manager.new_trade(symbol, side, entry_price, sizing.qty, signal["atr"], self.trade_cfg)
+        trade = stop_manager.new_trade(symbol, side, entry_price, sizing.qty, atr, trade_cfg)
         trade["initial_sl"] = trade["current_sl"] = sl_price
         trade["initial_tp"] = trade["current_tp"] = tp_price
         trade["leverage"] = leverage
+        trade.update(extra_trade_fields)
         self.state.set_trade(symbol, trade)
 
-        msg = (f"[진입] {symbol} {side.upper()} qty={sizing.qty} entry~{entry_price:.4f} "
-               f"SL={sl_price:.4f} TP={tp_price:.4f} lev={leverage}x conf={signal['confidence']:.2f}")
+        msg = (f"[진입{msg_tag}] {symbol} {side.upper()} qty={sizing.qty} entry~{entry_price:.4f} "
+               f"SL={sl_price:.4f} TP={tp_price:.4f} lev={leverage}x")
         logger.info(msg)
         self.notifier.send(msg)
         log_decision(self.log_dir, {"event": "entry", "symbol": symbol, "side": side, "qty": sizing.qty,
                                      "entry_price": entry_price, "sl": sl_price, "tp": tp_price,
-                                     "leverage": leverage, "signal": signal})
+                                     "leverage": leverage, **log_extra})
+
+    def _enter_trend(self, symbol: str, signal: dict, equity: float):
+        side = signal["direction"]
+        entry_price = self.client.get_last_price(symbol)
+        inst = self.client.get_instrument_info(symbol)
+        leverage = self._leverage_for(symbol, inst, signal["confidence"])
+        self._open(symbol, side, entry_price, equity, leverage, signal["atr"], self.trade_cfg,
+                   extra_trade_fields={}, log_extra={"signal": signal},
+                   msg_tag=f" conf={signal['confidence']:.2f}")
+
+    def _enter_range(self, symbol: str, signal: dict, equity: float):
+        range_cfg = self.trade_cfg.get("range_trade", {})
+        if not range_cfg.get("enabled", False):
+            return
+
+        range_high = signal.get("range_high", 0.0)
+        range_low = signal.get("range_low", 0.0)
+        atr = signal["atr"]
+        close = signal["close"]
+        if range_high <= 0 or range_low <= 0 or range_high <= range_low:
+            return
+
+        edge = atr * range_cfg.get("edge_atr_mult", 0.5)
+        if close <= range_low + edge:
+            side = "long"
+        elif close >= range_high - edge:
+            side = "short"
+        else:
+            return  # price sits in the middle of the range -- no edge to fade
+
+        entry_price = self.client.get_last_price(symbol)
+        inst = self.client.get_instrument_info(symbol)
+        leverage = self._leverage_for(symbol, inst, confidence=None)  # always use the symbol's max
+        self._open(symbol, side, entry_price, equity, leverage, atr, range_cfg,
+                   extra_trade_fields={"is_range_trade": True},
+                   log_extra={"range_high": range_high, "range_low": range_low},
+                   msg_tag=":range")
 
     # -- exits / management ---------------------------------------------------------
     def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
@@ -209,6 +254,17 @@ class Strategy:
 
         if stop_manager.check_signal_reversal(trade, signal, self.trade_cfg):
             self._close_and_settle(symbol, trade, "signal_reversal")
+            return
+
+        if stop_manager.check_stale_position(trade, price, self.trade_cfg):
+            self._close_and_settle(symbol, trade, "stale_timeout")
+            return
+
+        if trade.get("is_range_trade"):
+            # range/scalp trades exit only via their (tight) exchange SL/TP, the
+            # shared flash-move/reversal/stale-timeout checks above -- no riding
+            # the trade further with breakeven/trailing/TP-extension.
+            self.state.set_trade(symbol, trade)
             return
 
         atr = signal.get("atr") or trade["risk_distance"]
