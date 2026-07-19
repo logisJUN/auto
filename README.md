@@ -61,7 +61,10 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
    **청산될 때까지 계속 관리**됩니다(SL/TP/트레일링/정체청산 등) — 감시 목록에서
    빠지는 건 "새 진입 후보에서 제외"라는 뜻이지 "관리 중단"이 아닙니다.
    `exchange.universe.enabled: false`로 끄면 예전처럼 `exchange.symbols`에 적은
-   종목만 고정으로 거래합니다.
+   종목만 고정으로 거래합니다. 거래대금 상위권이어도 **테이커 수수료율이
+   `max_taker_fee_rate`(기본 0.06%)를 넘는 종목은 제외**됩니다 — 신규 상장/저유동성
+   종목 중엔 표준(~0.055%)의 2배인 종목이 섞여 있어서, 방향을 맞혀도 수수료만으로
+   수익을 깎아먹는 걸 막기 위함입니다. 제외된 만큼은 다음 순위 종목으로 채웁니다.
 1. **신호 수집 (2분마다 재계산, 캐시됨)**
    - 기술적 분석: 15분/1시간/4시간봉의 EMA 추세, RSI 모멘텀, MACD, 볼린저밴드 위치를
      ATR로 정규화해 종목별 스코어(-1~1)로 환산. 긴 시간프레임일수록 더 큰 가중치.
@@ -129,10 +132,15 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      (최대 `max_tp_extensions`회, 기본 3회 - 무한정 안 먹고 버티지 않도록 제한)
    - **신호 반전 조기청산**: 신호가 포지션 반대 방향으로 강하게(스코어/신뢰도 모두 기준
      이상) 바뀌면 익절/손절 전이라도 조기 청산.
-   - **정체(횡보) 포기 청산**: 포지션이 `stale_exit_after_min`(기본 60분) 이상 열려있는데
-     그 사이 가격이 진입가 대비 `stale_exit_max_move_pct`(기본 0.5%) 이내에서만 움직였으면,
-     손익 부호와 상관없이(플러스든 마이너스든) 시장가로 정리하고 그 슬롯을 비웁니다.
+   - **정체(횡보) 포기 청산**: 포지션이 일정 시간 이상 열려있는데 그 사이 가격이 진입가
+     대비 `stale_exit_max_move_pct`(기본 0.5%) 이내에서만 움직였으면, 손익 부호와
+     상관없이(플러스든 마이너스든) 시장가로 정리하고 그 슬롯을 비웁니다.
      `stale_exit_after_min: 0`으로 두면 이 체크 자체를 끌 수 있습니다.
+     **완전히 안 움직인 포지션을 정리하는 건 왕복 수수료만큼 확정 손실**이라, 슬롯/증거금이
+     이미 다 찼을 때만(=그 자금이 실제로 필요할 때만) `stale_exit_after_min`(기본 60분)의
+     빠른 기준을 쓰고, 여유가 있을 때는 `stale_exit_after_min_no_pressure`(기본 240분,
+     4시간)로 더 여유롭게 기다립니다 — 필요도 없는데 수수료만 내고 정리하는 걸 줄이기
+     위함입니다.
    - **레인지 트레이드는 트레일링/TP연장을 타지 않습니다**: 손익분기/트레일링/TP연장은
      추세추종 진입에만 적용되고, 레인지 진입은 위 급락탈출/신호반전/정체청산과 자기 자신의
      (좁은) SL/TP로만 종료됩니다 — 원래 "단타"로 설계된 진입이라 더 오래 들고 가지 않습니다.
@@ -348,7 +356,7 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 | 항목 | 의미 |
 |---|---|
 | `exchange.symbols` | 항상 고정으로 감시할 종목 목록 (동적 유니버스와 무관하게 항상 포함) |
-| `exchange.universe.*` | 동적 종목 스캔 (`enabled`, `top_n`, `rescan_interval_hours`) — 켜져 있으면 Bybit 전종목을 24시간 거래대금 기준으로 스캔해서 상위 `top_n`개를 `exchange.symbols`와 합쳐 감시 |
+| `exchange.universe.*` | 동적 종목 스캔 (`enabled`, `top_n`, `rescan_interval_hours`, `max_taker_fee_rate`) — 켜져 있으면 Bybit 전종목을 24시간 거래대금 기준으로 스캔해서(수수료율 높은 종목은 제외) 상위 `top_n`개를 `exchange.symbols`와 합쳐 감시 |
 | `risk.position_size_pct_of_equity` | 포지션당 증거금으로 쓸 자산 비율 (여기에 레버리지를 곱한 게 명목 포지션 크기) |
 | `risk.margin_buffer_pct` | 항상 비워둘 증거금 비율. 다른 포지션이 이미 많이 썼으면 새 진입 증거금을 이만큼 남기고 깎음 |
 | `risk.max_leverage` | `default_leverage_range`가 아예 없을 때만 쓰이는 최종 폴백 상한 |
@@ -361,7 +369,7 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 | `signals.weights` | 기술적/거래량/뉴스/폴리마켓 각 신호의 반영 비중 |
 | `signals.technical.range_lookback` | 레인지 고점/저점을 구할 때 볼 최근 봉 개수 |
 | `trade_management.*` | 손절/익절/트레일링/TP연장/긴급탈출 세부 파라미터 |
-| `trade_management.stale_exit_after_min` / `stale_exit_max_move_pct` | 이 시간 이상 열려있는데 가격이 이 %만큼도 안 움직였으면(횡보) 손익 무관 정리. 0으로 끄기 가능 |
+| `trade_management.stale_exit_after_min` / `stale_exit_after_min_no_pressure` / `stale_exit_max_move_pct` | 이 시간 이상 열려있는데 가격이 이 %만큼도 안 움직였으면(횡보) 손익 무관 정리. 슬롯/증거금 여유가 없을 때는 전자(짧음), 여유 있을 때는 후자(김) 기준 사용. 0으로 끄기 가능 |
 | `trade_management.range_trade.*` | 신호 중립일 때만 시도하는 레인지 역추세 단타 진입의 세부 파라미터 (`enabled`, `edge_atr_mult`, `max_range_width_atr_mult`, 자체 `atr_sl_multiplier`/`atr_tp_multiplier`) |
 | `loop.fast_poll_sec` / `idle_poll_sec` | 포지션 보유 중 / 미보유 시 확인 주기 |
 

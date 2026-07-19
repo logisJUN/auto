@@ -199,6 +199,21 @@ class Strategy:
         target = equity * self.risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0
         return max(0.0, min(target, headroom))
 
+    def _has_capital_pressure(self) -> bool:
+        """True if there's no room for a new position right now (every slot
+        used, or margin headroom exhausted) -- i.e. recycling a stale
+        position's capital would actually be useful. Used to decide how
+        patient check_stale_position should be: no point rushing to pay a
+        round-trip fee to free capital nothing is waiting on.
+        """
+        if self.state.open_trade_count() >= self.risk_cfg.get("max_concurrent_positions", 1):
+            return True
+        try:
+            equity = self.client.get_equity_usdt()
+        except BybitAPIError:
+            return True  # can't tell -- default to the normal (less patient) timeout
+        return self._margin_for_new_position(equity) <= 0
+
     def _open(self, symbol: str, side: str, entry_price: float, margin: float,
               leverage: float, atr: float, trade_cfg: dict, extra_trade_fields: dict,
               log_extra: dict, msg_tag: str):
@@ -420,7 +435,7 @@ class Strategy:
             self._close_and_settle(symbol, trade, "signal_reversal")
             return
 
-        if stop_manager.check_stale_position(trade, price, self.trade_cfg):
+        if stop_manager.check_stale_position(trade, price, self.trade_cfg, self._has_capital_pressure()):
             self._close_and_settle(symbol, trade, "stale_timeout")
             return
 
@@ -464,7 +479,10 @@ class Strategy:
 
         try:
             top_n = self.universe_cfg.get("top_n", 30)
-            screened = universe.screen_top_symbols(self.client, quote_suffix="USDT", top_n=top_n)
+            screened = universe.screen_top_symbols(
+                self.client, quote_suffix="USDT", top_n=top_n,
+                max_taker_fee_rate=self.universe_cfg.get("max_taker_fee_rate"),
+            )
         except Exception:
             logger.exception("universe screening failed -- keeping current watchlist")
             self._last_universe_scan = now  # don't retry every single tick on a persistent error

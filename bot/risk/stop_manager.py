@@ -100,16 +100,25 @@ def check_signal_reversal(trade: dict, agg_signal: dict, cfg: dict) -> bool:
     return False
 
 
-def check_stale_position(trade: dict, current_price: float, cfg: dict) -> bool:
-    """True if the trade has been open long enough (stale_exit_after_min) and price
-    has barely moved from entry since (stale_exit_max_move_pct) -- i.e. it's going
-    nowhere. Applies regardless of whether the trade is currently up or down, so a
-    stuck position gives up its slot for a fresh signal on another symbol instead of
+def check_stale_position(trade: dict, current_price: float, cfg: dict, capital_pressure: bool = True) -> bool:
+    """True if the trade has been open long enough and price has barely moved
+    from entry since (stale_exit_max_move_pct) -- i.e. it's going nowhere.
+    Applies regardless of whether the trade is currently up or down, so a
+    stuck position gives up its slot for a fresh signal elsewhere instead of
     sitting there indefinitely.
+
+    Closing a truly flat position is a guaranteed small loss from round-trip
+    fees alone, worth paying only if that capital is actually needed. When
+    `capital_pressure` is False (there's free margin/slots -- nothing is
+    waiting on this one), the timeout is relaxed to stale_exit_after_min_no_pressure
+    instead of the normal stale_exit_after_min, so a flat position gets more
+    patience when there's no rush to recycle it.
     """
     timeout_min = cfg.get("stale_exit_after_min", 0)
     if timeout_min <= 0:
         return False
+    if not capital_pressure:
+        timeout_min = cfg.get("stale_exit_after_min_no_pressure", timeout_min * 4)
     if time.time() - trade["opened_at"] < timeout_min * 60:
         return False
 

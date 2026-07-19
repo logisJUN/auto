@@ -17,6 +17,11 @@ exchange:
     enabled: true
     top_n: 30
     rescan_interval_hours: 1
+    # some newly-listed/lower-liquidity perpetuals charge double the standard
+    # ~0.055% taker fee -- exclude anything above this rate regardless of how
+    # much turnover it has (a structural drag on every round trip). Symbols
+    # filtered out are backfilled from the next-highest-turnover candidates.
+    max_taker_fee_rate: 0.0006
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
@@ -132,7 +137,13 @@ trade_management:
   # "give up" exit: if a position has been open at least this long AND price is
   # still within stale_exit_max_move_pct of entry, close it (profit or loss) and
   # free the slot for a fresh signal on another symbol. 0 disables this check.
+  # Closing a truly flat position is a guaranteed small loss from round-trip
+  # fees alone -- only worth rushing into when that capital is actually needed.
+  # stale_exit_after_min applies when every slot/margin is currently in use;
+  # stale_exit_after_min_no_pressure (much longer) applies when there's free
+  # room and nothing is waiting on this position's capital.
   stale_exit_after_min: 60
+  stale_exit_after_min_no_pressure: 240
   stale_exit_max_move_pct: 0.5
 
   # Range/mean-reversion scalp entries, only tried when the trend signal

@@ -102,6 +102,24 @@ class BybitClient:
         result = self._call(self.session.get_tickers, category=self.category)
         return result.get("list", [])
 
+    def get_taker_fee_rate(self, symbol: str) -> float | None:
+        """This account's taker fee rate for `symbol` (e.g. 0.00055 for
+        0.055%), or None if the lookup fails. Some newly-listed/lower-liquidity
+        perpetuals carry a materially higher fee tier than the standard rate --
+        used to screen those out of the dynamic universe scan.
+        """
+        try:
+            result = self._call(self.session.get_fee_rates, category=self.category, symbol=symbol)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["takerFeeRate"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def get_instrument_info(self, symbol: str) -> InstrumentInfo:
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]

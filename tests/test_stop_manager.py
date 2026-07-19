@@ -18,6 +18,7 @@ CFG = {
     "reversal_exit_confidence": 0.6,
     "min_confidence_to_enter": 0.55,
     "stale_exit_after_min": 60,
+    "stale_exit_after_min_no_pressure": 240,
     "stale_exit_max_move_pct": 0.5,
 }
 
@@ -136,3 +137,16 @@ def test_stale_position_disabled_when_timeout_is_zero():
     trade["opened_at"] = time.time() - 1000 * 60
     cfg = {**CFG, "stale_exit_after_min": 0}
     assert not stop_manager.check_stale_position(trade, current_price=100.0, cfg=cfg)
+
+
+def test_stale_position_waits_longer_without_capital_pressure():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 90 * 60  # past the normal 60min, well under 240min
+    assert stop_manager.check_stale_position(trade, current_price=100.1, cfg=CFG, capital_pressure=True)
+    assert not stop_manager.check_stale_position(trade, current_price=100.1, cfg=CFG, capital_pressure=False)
+
+
+def test_stale_position_fires_without_pressure_once_past_the_longer_timeout():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
+    trade["opened_at"] = time.time() - 241 * 60  # past both timeouts
+    assert stop_manager.check_stale_position(trade, current_price=100.1, cfg=CFG, capital_pressure=False)
