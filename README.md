@@ -166,6 +166,12 @@ tests/               핵심 로직(사이징, 손절/익절, 신호) 단위 테�
      `pnl_is_estimate: true`로 표시됩니다 (수수료 미반영이니 참고만 하세요).
 6. **일일 손실 한도**: 하루(UTC 기준) 실현손실이 `risk.max_daily_loss_pct`(기본 8%)를
    넘으면 그날은 신규 진입을 멈춥니다(자정 UTC에 리셋).
+   - **한도 기록이 거래소 기준으로 복원됩니다**: `data/state.json`에 저장된 오늘 실현손익
+     기록이 초기화되면(Render 무료 플랜의 슬립/재배포 등) 예전엔 그냥 0으로 리셋해서
+     한도 보호가 무력화될 수 있었습니다. 지금은 로컬 기록이 오늘 날짜와 안 맞으면
+     Bybit의 청산손익 기록에서 **자정(UTC) 이후 실제로 실현된 손익을 다시 계산**해서
+     복원합니다 — 정상적인 하루 시작(0으로 시작)과 리셋 후 복구(실제 손익으로 복원) 둘 다
+     이 방식으로 정확하게 처리됩니다.
 
 ---
 
@@ -263,6 +269,19 @@ journalctl -u bybit-bot -f        # 실시간 로그
 3. **푸시 알림 (선택)**: `.env`에 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`를
    설정하면 진입/청산/긴급탈출 시마다 텔레그램으로 알림이 옵니다. 대시보드를
    계속 열어두지 않아도 잠금화면 알림으로 확인 가능합니다.
+4. **일일 요약 이메일 (선택)**: `.env`에 `EMAIL_SMTP_HOST`/`EMAIL_SMTP_PORT`/
+   `EMAIL_SMTP_USER`/`EMAIL_SMTP_PASSWORD`/`EMAIL_TO`를 설정하면, 매일(UTC 날짜 기준)
+   한 번씩 오늘 실현손익·누적 승률·추세추종 vs 레인지 단타·신뢰도 구간별 성과를
+   요약해서 이메일로 보냅니다. **로컬 로그 파일과 달리 이메일은 Render 서버 밖(받는
+   사람 메일함)에 남기 때문에, 재배포/슬립으로 `logs/decisions.jsonl`이 초기화돼도
+   그 전날까지의 기록은 이메일로 남아있습니다.**
+   - Gmail을 쓴다면: `EMAIL_SMTP_HOST=smtp.gmail.com`, `EMAIL_SMTP_PORT=465`,
+     `EMAIL_SMTP_USER`에 본인 Gmail 주소, `EMAIL_SMTP_PASSWORD`에는 **일반 비밀번호가
+     아니라** [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+     에서 발급받는 **앱 비밀번호**(2단계 인증 활성화 필요)를 넣으세요.
+   - `EMAIL_TO`는 받을 주소(본인 메일 주소로), `EMAIL_FROM`은 비워두면 `EMAIL_SMTP_USER`와
+     동일하게 처리됩니다.
+   - 필수 값이 하나라도 비어있으면 이 기능은 조용히 꺼진 상태로 유지됩니다(에러 안 남).
 
 ---
 
@@ -281,7 +300,9 @@ VPS 대신 [Render](https://render.com)에서 돌리고 싶다면 아래처럼 �
 1. Render 대시보드 → **New** → **Blueprint** → 이 레포 선택 → `render.yaml` 자동 인식.
 2. 배포 전에 `sync: false`로 표시된 환경변수를 Render 대시보드에서 직접 채워넣습니다:
    `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `NEWSAPI_KEY`(선택), `TELEGRAM_BOT_TOKEN`(선택),
-   `TELEGRAM_CHAT_ID`(선택), `DASHBOARD_TOKEN`(무작위 값으로).
+   `TELEGRAM_CHAT_ID`(선택), `DASHBOARD_TOKEN`(무작위 값으로), `EMAIL_SMTP_HOST`/
+   `EMAIL_SMTP_USER`/`EMAIL_SMTP_PASSWORD`/`EMAIL_FROM`/`EMAIL_TO`(선택, 일일 요약
+   이메일용 — 아래 "24시간 운영" 섹션 참고).
 3. `BYBIT_TESTNET`은 기본 `true`. 실거래로 전환하려면 `false`로 바꾸세요.
 4. Start Command는 `gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
    입니다. **gunicorn 워커는 반드시 1개**여야 합니다 (워커가 늘어나면 봇 루프가 프로세스마다
@@ -351,6 +372,10 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 5. 저장 후 UptimeRobot의 Response Time 그래프에서 계속 200이 찍히는지 확인하세요.
    한 번이라도 슬립되어 Render가 콜드스타트하면 그 응답은 지연되거나 실패로 찍힐 수
    있습니다 (콜드스타트는 보통 수십 초 소요).
+6. **(선택) 핑 서비스 이중화**: UptimeRobot 자체가 다운되거나 지연되면 그동안 슬립을
+   못 막습니다. [cron-job.org](https://cron-job.org)처럼 다른 무료 핑 서비스에도
+   같은 `/healthz` URL을 5~10분 간격으로 등록해두면, 한쪽이 문제 생겨도 다른 쪽이
+   계속 깨워줘서 슬립 위험을 줄일 수 있습니다.
 
 ---
 

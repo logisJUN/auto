@@ -89,7 +89,10 @@ def compute_performance_summary(log_dir: str | Path, limit_lines: int = 5000) ->
     """
     path = Path(log_dir) / "decisions.jsonl"
     if not path.exists():
-        return {"trades": [], "overall": _trade_stats([]), "by_confidence": {}, "by_type": {}}
+        return {
+            "trades": [], "overall": _trade_stats([]), "by_confidence": {},
+            "by_type": {"trend": _trade_stats([]), "range": _trade_stats([])},
+        }
 
     lines = path.read_text(encoding="utf-8").splitlines()[-limit_lines:]
     events = []

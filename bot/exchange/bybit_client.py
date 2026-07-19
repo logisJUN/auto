@@ -216,6 +216,29 @@ class BybitClient:
         except (KeyError, ValueError, TypeError):
             return None
 
+    def get_closed_pnl_since(self, start_time_ms: int) -> list[dict]:
+        """Every closed-pnl record (across all symbols) since start_time_ms,
+        paginating through Bybit's cursor if there's more than one page. Used
+        to reconstruct today's realized PnL from the exchange's own records
+        after a local state reset, instead of just assuming it was 0.
+        """
+        out: list[dict] = []
+        cursor = None
+        for _ in range(20):  # hard cap so a pagination bug can't loop forever
+            kwargs = dict(category=self.category, startTime=start_time_ms, limit=100)
+            if cursor:
+                kwargs["cursor"] = cursor
+            try:
+                result = self._call(self.session.get_closed_pnl, **kwargs)
+            except BybitAPIError:
+                logger.exception("failed to fetch closed-pnl history since %s", start_time_ms)
+                break
+            out.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+        return out
+
     def set_leverage(self, symbol: str, leverage: float) -> None:
         lev = str(int(leverage))
         try:

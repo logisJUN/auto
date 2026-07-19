@@ -71,13 +71,15 @@ class StateStore:
         self.save()
 
     # -- daily loss tracking ---------------------------------------------------------
-    def ensure_daily(self, current_equity: float) -> dict:
-        daily = self._state["daily"]
-        if daily.get("date") != _today_utc() or daily.get("start_equity") is None:
-            daily = {"date": _today_utc(), "start_equity": current_equity, "realized_pnl": 0.0}
-            self._state["daily"] = daily
-            self.save()
-        return daily
+    def seed_daily(self, date: str, start_equity: float, realized_pnl: float):
+        """Sets today's daily-loss-tracking record. Callers should reconstruct
+        realized_pnl from the exchange's own history when the existing local
+        record doesn't match today (see Strategy._sync_daily_state), rather
+        than assuming 0 -- a local state reset (a real risk on Render's free
+        plan) would otherwise silently defeat the daily loss circuit breaker.
+        """
+        self._state["daily"] = {"date": date, "start_equity": start_equity, "realized_pnl": realized_pnl}
+        self.save()
 
     def add_realized_pnl(self, pnl: float):
         self._state["daily"]["realized_pnl"] = self._state["daily"].get("realized_pnl", 0.0) + pnl
@@ -90,6 +92,14 @@ class StateStore:
             return 0.0
         pnl = daily.get("realized_pnl", 0.0)
         return max(0.0, -pnl / start * 100.0)
+
+    # -- misc ---------------------------------------------------------
+    def get_last_summary_date(self) -> str | None:
+        return self._state.get("last_summary_date")
+
+    def set_last_summary_date(self, date: str):
+        self._state["last_summary_date"] = date
+        self.save()
 
     def snapshot(self) -> dict:
         return json.loads(json.dumps(self._state, default=str))

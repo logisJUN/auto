@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 
+from bot.email_notify import EmailNotifier
 from bot.exchange.bybit_client import BybitClient, BybitAPIError
-from bot.logger import log_decision
+from bot.logger import compute_performance_summary, log_decision
 from bot.notify import Notifier
 from bot.risk import position_sizing, stop_manager
 from bot.signals import aggregator, technical, universe
@@ -18,6 +20,10 @@ from bot.signals.polymarket import PolymarketSignal
 from bot.state import StateStore
 
 logger = logging.getLogger("bot.strategy")
+
+
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 class SignalCache:
@@ -47,6 +53,15 @@ class Strategy:
         self.polymarket_signal = PolymarketSignal(self.signals_cfg.get("polymarket", {}))
         self.flash_tracker = stop_manager.FlashMoveTracker()
         self._signal_cache: dict[str, SignalCache] = {s: SignalCache() for s in self.symbols}
+
+        self.email = EmailNotifier(
+            smtp_host=cfg.secrets.email_smtp_host,
+            smtp_port=cfg.secrets.email_smtp_port,
+            smtp_user=cfg.secrets.email_smtp_user,
+            smtp_password=cfg.secrets.email_smtp_password,
+            email_from=cfg.secrets.email_from,
+            email_to=cfg.secrets.email_to,
+        )
 
     # -- signal computation ---------------------------------------------------------
     def _fetch_klines_multi(self, symbol: str) -> dict[str, list[dict]]:
@@ -88,11 +103,68 @@ class Strategy:
         limit = self.risk_cfg.get("max_daily_loss_pct", 8.0)
         return self.state.daily_loss_pct() >= limit
 
+    def _sync_daily_state(self, equity: float):
+        """Keeps today's daily-loss-limit tracking accurate. The old behavior
+        (state.ensure_daily) just reset realized_pnl to 0 whenever the local
+        record didn't match today -- correct for a normal UTC day rollover, but
+        on a state reset (a real risk on Render's free plan) it silently threw
+        away whatever had actually been lost today, defeating the daily loss
+        circuit breaker. Reconstructing "realized PnL since midnight UTC" from
+        Bybit's own closed-pnl history is correct either way: a real rollover
+        recovers 0 (nothing closed yet today) same as before, while a mid-day
+        reset recovers the real number instead of assuming zero.
+        """
+        daily = self.state.snapshot().get("daily", {})
+        if daily.get("start_equity") is not None and daily.get("date") == _today_utc():
+            return  # already accurate for today
+
+        realized_today = 0.0
+        try:
+            midnight = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc)
+            records = self.client.get_closed_pnl_since(int(midnight.timestamp() * 1000))
+            realized_today = sum(float(r.get("closedPnl") or 0) for r in records)
+        except Exception:
+            logger.exception("failed to reconstruct today's realized PnL from exchange -- starting at 0")
+
+        start_equity = equity - realized_today
+        self.state.seed_daily(_today_utc(), start_equity, realized_today)
+        if realized_today != 0.0:
+            logger.warning("reconstructed today's daily PnL from exchange history (state was reset): "
+                           "realized=%.4f start_equity=%.4f", realized_today, start_equity)
+
+    def _maybe_send_daily_summary(self):
+        if not self.email.enabled:
+            return
+        today = _today_utc()
+        if self.state.get_last_summary_date() == today:
+            return
+
+        daily = self.state.snapshot().get("daily", {})
+        perf = compute_performance_summary(self.log_dir)
+        overall = perf["overall"]
+        win_rate = overall["win_rate"]
+        lines = [
+            f"날짜: {today}",
+            f"오늘 실현손익: {daily.get('realized_pnl', 0.0):.4f} USDT",
+            "",
+            f"누적 거래: {overall['count']}건",
+            f"누적 승률: {win_rate * 100:.0f}%" if win_rate is not None else "누적 승률: -",
+            f"누적 손익: {overall['total_pnl']:.4f} USDT",
+            "",
+            f"추세추종: {perf['by_type']['trend']['count']}건, 손익 {perf['by_type']['trend']['total_pnl']:.4f} USDT",
+            f"레인지 단타: {perf['by_type']['range']['count']}건, 손익 {perf['by_type']['range']['total_pnl']:.4f} USDT",
+        ]
+        for label, stats in sorted(perf["by_confidence"].items()):
+            lines.append(f"신뢰도 {label}: {stats['count']}건, 승률 {stats['win_rate'] * 100:.0f}%, 손익 {stats['total_pnl']:.4f} USDT")
+
+        self.email.send(f"[Bybit Bot] {today} 일일 요약", "\n".join(lines))
+        self.state.set_last_summary_date(today)
+
     def try_enter(self, symbol: str):
         if self.state.get_trade(symbol) is not None:
             return
         equity = self.client.get_equity_usdt()
-        self.state.ensure_daily(equity)
+        self._sync_daily_state(equity)
         if self._daily_loss_breached():
             return
 
@@ -558,6 +630,10 @@ class Strategy:
     def tick(self):
         self._refresh_universe()
         self._reconcile_orphaned_positions()
+        try:
+            self._maybe_send_daily_summary()
+        except Exception:
+            logger.exception("failed to send daily summary email")
 
         open_symbols = set(self.state.snapshot().get("trades", {}).keys())
         symbols_to_check = list(dict.fromkeys(self.symbols + list(open_symbols)))

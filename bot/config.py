@@ -27,6 +27,12 @@ class Secrets:
     telegram_bot_token: str | None
     telegram_chat_id: str | None
     dashboard_token: str
+    email_smtp_host: str | None = None
+    email_smtp_port: int = 465
+    email_smtp_user: str | None = None
+    email_smtp_password: str | None = None
+    email_from: str | None = None
+    email_to: str | None = None
 
 
 @dataclass
@@ -65,6 +71,12 @@ def load_config(env_path: str | Path | None = None, yaml_path: str | Path | None
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None,
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip() or None,
         dashboard_token=os.getenv("DASHBOARD_TOKEN", "changeme").strip(),
+        email_smtp_host=os.getenv("EMAIL_SMTP_HOST", "").strip() or None,
+        email_smtp_port=int(os.getenv("EMAIL_SMTP_PORT", "465").strip() or "465"),
+        email_smtp_user=os.getenv("EMAIL_SMTP_USER", "").strip() or None,
+        email_smtp_password=os.getenv("EMAIL_SMTP_PASSWORD", "").strip() or None,
+        email_from=os.getenv("EMAIL_FROM", "").strip() or None,
+        email_to=os.getenv("EMAIL_TO", "").strip() or None,
     )
 
     yaml_file = Path(yaml_path or ROOT_DIR / "config.yaml")

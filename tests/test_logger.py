@@ -58,3 +58,8 @@ def test_no_log_file_returns_empty_summary(tmp_path):
     summary = compute_performance_summary(tmp_path / "does_not_exist")
     assert summary["overall"]["count"] == 0
     assert summary["trades"] == []
+    # by_type must have the same shape as the normal path (trend/range keys
+    # with zero-count stats), not an empty dict -- callers index into it
+    # unconditionally (e.g. the daily summary email).
+    assert summary["by_type"]["trend"]["count"] == 0
+    assert summary["by_type"]["range"]["count"] == 0
