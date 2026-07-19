@@ -19,7 +19,7 @@ services:
       - key: BYBIT_API_SECRET
         sync: false
       - key: BYBIT_TESTNET
-        value: "true"
+        sync: false
       - key: NEWSAPI_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
