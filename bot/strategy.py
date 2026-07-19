@@ -477,8 +477,69 @@ class Strategy:
         self._last_universe_scan = now
         logger.info("universe refreshed: %d symbols (added=%s, dropped=%s)", len(merged), added, dropped)
 
+    def _reconcile_orphaned_positions(self):
+        """Finds any position that's actually open on the exchange but isn't in
+        local state (e.g. state.json was reset -- a real risk on Render's free
+        plan -- or a position was opened outside the bot). Without this, such a
+        position would never even be looked at: tick() only manages symbols in
+        the watchlist or already-tracked state, so its SL/TP could sit unchecked
+        indefinitely. Adopts it into state (keeping its existing SL/TP if any),
+        verifying/repairing/closing exactly like a normal entry would.
+        """
+        try:
+            open_positions = self.client.get_all_open_positions()
+        except BybitAPIError:
+            logger.exception("failed to reconcile open positions against local state")
+            return
+
+        tracked = set(self.state.snapshot().get("trades", {}).keys())
+        for pos in open_positions:
+            symbol = pos["symbol"]
+            if symbol in tracked:
+                continue
+
+            logger.warning("found an open %s position not tracked locally -- adopting it", symbol)
+            side = "long" if pos["side"] == "Buy" else "short"
+
+            # We don't know this position's real entry-time ATR (we didn't open
+            # it, or its state was lost) -- the current cached signal's ATR is
+            # the best available stand-in for sizing a fresh SL/TP if needed.
+            signal = self.get_signal(symbol)
+            atr = signal.get("atr") or pos["entry_price"] * 0.01
+
+            trade = stop_manager.new_trade(symbol, side, pos["entry_price"], pos["size"], atr, self.trade_cfg)
+            trade["leverage"] = self.risk_cfg.get("max_leverage", 5)
+
+            if pos["stop_loss"] > 0 and pos["take_profit"] > 0:
+                trade["initial_sl"] = trade["current_sl"] = pos["stop_loss"]
+                trade["initial_tp"] = trade["current_tp"] = pos["take_profit"]
+            else:
+                sl_price = self.client.round_price(symbol, trade["initial_sl"])
+                tp_price = self.client.round_price(symbol, trade["initial_tp"])
+                if not self._repair_sl_tp(symbol, sl_price, tp_price):
+                    logger.critical("adopted %s has no SL/TP and repair failed -- closing for safety", symbol)
+                    self.notifier.send(f"[긴급] 추적 안 되던 {symbol} 포지션의 SL/TP 설정 실패 - 청산 시도. 직접 확인하세요.")
+                    try:
+                        close_qty = self.client.round_qty(symbol, pos["size"])
+                        self.client.close_position(symbol, side, close_qty)
+                    except BybitAPIError:
+                        logger.critical("COULD NOT CLOSE ORPHANED UNPROTECTED POSITION %s -- MANUAL ACTION REQUIRED", symbol)
+                    continue
+                trade["initial_sl"] = trade["current_sl"] = sl_price
+                trade["initial_tp"] = trade["current_tp"] = tp_price
+
+            self.state.set_trade(symbol, trade)
+            self.notifier.send(
+                f"[알림] 추적 안 되던 {symbol} 포지션을 발견해서 관리 대상으로 등록했습니다 "
+                f"(SL={trade['current_sl']:.4f} TP={trade['current_tp']:.4f})."
+            )
+            log_decision(self.log_dir, {"event": "position_adopted", "symbol": symbol, "side": side,
+                                         "entry_price": pos["entry_price"], "qty": pos["size"],
+                                         "sl": trade["current_sl"], "tp": trade["current_tp"]})
+
     def tick(self):
         self._refresh_universe()
+        self._reconcile_orphaned_positions()
 
         open_symbols = set(self.state.snapshot().get("trades", {}).keys())
         symbols_to_check = list(dict.fromkeys(self.symbols + list(open_symbols)))

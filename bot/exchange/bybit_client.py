@@ -151,6 +151,29 @@ class BybitClient:
                 }
         return None
 
+    def get_all_open_positions(self, settle_coin: str = "USDT") -> list[dict]:
+        """Lists every currently open position under this settle coin, regardless
+        of symbol -- used to reconcile local state against reality (e.g. a
+        position that's open on the exchange but the bot lost track of after a
+        state reset, so its SL/TP would otherwise never get checked).
+        """
+        result = self._call(self.session.get_positions, category=self.category, settleCoin=settle_coin)
+        out = []
+        for p in result.get("list", []):
+            if float(p.get("size") or 0) <= 0:
+                continue
+            out.append({
+                "symbol": p["symbol"],
+                "side": p["side"],
+                "size": float(p["size"]),
+                "entry_price": float(p["avgPrice"]),
+                "unrealized_pnl": float(p.get("unrealisedPnl") or 0),
+                "position_idx": int(p.get("positionIdx") or 0),
+                "stop_loss": float(p.get("stopLoss") or 0),
+                "take_profit": float(p.get("takeProfit") or 0),
+            })
+        return out
+
     def get_closed_pnl(self, symbol: str) -> dict | None:
         """Returns the exchange's own record for the most recently closed position
         on `symbol`, whose closedPnl is net of trading fees (unlike computing
