@@ -240,6 +240,22 @@ class Strategy:
             log_decision(self.log_dir, {"event": "entry_failed", "symbol": symbol, "error": str(exc)})
             return
 
+        # place_order's stopLoss/takeProfit params can silently fail to attach
+        # even when the base market order fills, leaving a naked leveraged
+        # position with no protective stop on the exchange. Verify and repair
+        # before ever recording this as a tracked, "protected" trade.
+        exchange_position = self.client.get_position(symbol)
+        sl_tp_attached = bool(exchange_position) and exchange_position["stop_loss"] > 0 and exchange_position["take_profit"] > 0
+        if not sl_tp_attached and not self._repair_sl_tp(symbol, sl_price, tp_price):
+            logger.critical("%s opened with NO protective SL/TP and repair failed -- closing immediately", symbol)
+            try:
+                self.client.close_position(symbol, side, qty)
+            except BybitAPIError as exc:
+                logger.critical("COULD NOT CLOSE UNPROTECTED POSITION %s -- MANUAL ACTION REQUIRED: %s", symbol, exc)
+            self.notifier.send(f"[긴급] {symbol} SL/TP 설정 실패 - 긴급 청산 시도했습니다. Bybit 앱에서 직접 확인하세요.")
+            log_decision(self.log_dir, {"event": "sl_tp_attach_failed", "symbol": symbol})
+            return
+
         trade = stop_manager.new_trade(symbol, side, entry_price, qty, atr, trade_cfg)
         trade["initial_sl"] = trade["current_sl"] = sl_price
         trade["initial_tp"] = trade["current_tp"] = tp_price
@@ -350,6 +366,20 @@ class Strategy:
         log_decision(self.log_dir, {"event": "exit", "symbol": symbol, "reason": reason,
                                      "exit_price": exit_price, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
 
+    def _repair_sl_tp(self, symbol: str, sl_price: float, tp_price: float) -> bool:
+        """Attempts to (re)attach SL/TP to a position that's missing one or both
+        on the exchange. Returns False only if the repair call itself fails --
+        callers are expected to treat that as serious (an unprotected leveraged
+        position) and close out rather than keep holding it.
+        """
+        logger.error("%s missing SL/TP on the exchange -- attempting to reattach", symbol)
+        try:
+            self.client.update_trading_stop(symbol, stop_loss=sl_price, take_profit=tp_price)
+            return True
+        except BybitAPIError as exc:
+            logger.critical("failed to reattach SL/TP for %s: %s", symbol, exc)
+            return False
+
     def manage_open_position(self, symbol: str):
         trade = self.state.get_trade(symbol)
         if trade is None:
@@ -362,6 +392,15 @@ class Strategy:
             # position that's already zero (Bybit rejects it with ErrCode 110017).
             self._close_and_settle(symbol, trade, "sl_tp_hit", already_closed=True)
             return
+
+        if exchange_position["stop_loss"] <= 0 or exchange_position["take_profit"] <= 0:
+            # Ongoing safety net, not just at entry: repair or, failing that, exit
+            # rather than keep holding an unprotected leveraged position.
+            if not self._repair_sl_tp(symbol, trade["current_sl"], trade["current_tp"]):
+                logger.critical("%s still has no SL/TP after repair attempt -- closing for safety", symbol)
+                self.notifier.send(f"[긴급] {symbol} SL/TP 재설정 실패 - 안전을 위해 청산합니다. 직접 확인하세요.")
+                self._close_and_settle(symbol, trade, "sl_tp_missing")
+                return
 
         price = self.client.get_last_price(symbol)
         window = self.trade_cfg.get("flash_move_window_sec", 45)

@@ -76,7 +76,12 @@ def _make_strategy(state_path, log_path):
     client.round_qty.side_effect = lambda symbol, qty: round(qty, 2)
     client.get_last_price.return_value = 100.0
     client.open_position.return_value = {}
-    client.get_position.return_value = None
+    # Non-zero stop_loss/take_profit -> the new post-entry SL/TP verification
+    # in _open() sees them as already attached and doesn't try to repair them.
+    client.get_position.return_value = {
+        "symbol": "X", "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
+    }
     client.close_position.return_value = {}
     client.get_closed_pnl.return_value = {
         "closed_pnl": 1.0, "avg_exit_price": 100.0, "updated_time_ms": 99999999999999,

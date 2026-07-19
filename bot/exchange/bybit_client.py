@@ -142,6 +142,12 @@ class BybitClient:
                     "entry_price": float(p["avgPrice"]),
                     "unrealized_pnl": float(p.get("unrealisedPnl") or 0),
                     "position_idx": int(p.get("positionIdx") or 0),
+                    # "0"/"" from Bybit means no SL/TP is actually set on this
+                    # position -- used to verify one was actually attached
+                    # (place_order's stopLoss/takeProfit params can silently
+                    # fail to attach even when the base order itself fills).
+                    "stop_loss": float(p.get("stopLoss") or 0),
+                    "take_profit": float(p.get("takeProfit") or 0),
                 }
         return None
 
