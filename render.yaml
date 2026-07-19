@@ -2,11 +2,12 @@ services:
   - type: web
     name: bybit-bot
     runtime: python
-    # Starter plan: never sleeps (no UptimeRobot needed), and supports the
-    # persistent disk below so data/state.json and logs/decisions.jsonl
-    # survive redeploys/restarts instead of resetting every time -- needed for
-    # the dashboard's performance-review history to actually accumulate.
-    plan: starter
+    # Free plan has no persistent disk: data/state.json and logs/ reset on
+    # every sleep+wake or redeploy. An external uptime pinger (e.g.
+    # UptimeRobot hitting /healthz every <15min) is required to keep this
+    # from sleeping; see README.md for the trade-offs of this setup versus
+    # a paid plan with a disk.
+    plan: free
     region: singapore
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
@@ -27,11 +28,3 @@ services:
         sync: false
       - key: DASHBOARD_TOKEN
         sync: false
-      - key: DATA_DIR
-        value: /var/data/data
-      - key: LOG_DIR
-        value: /var/data/logs
-    disk:
-      name: bybit-bot-data
-      mountPath: /var/data
-      sizeGB: 1

@@ -294,28 +294,43 @@ Blueprint를 쓰지 않는다면 New → Web Service로 직접 만들고:
 - Start Command: `gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
 - 위 3.의 환경변수들을 동일하게 설정.
 
-### C. 플랜 선택: Starter + 영구 디스크 (기본값) vs Free + UptimeRobot
+### C. 플랜 선택: Free + UptimeRobot (기본값) vs Starter + 영구 디스크
 
-`render.yaml`은 기본값이 **`plan: starter` + 영구 디스크**입니다. 두 방식의 트레이드오프:
+`render.yaml`은 기본값이 **`plan: free`** 입니다. Free Web Service는 15분간 아무 HTTP
+요청도 없으면 슬립되고, 슬립되는 순간 봇 루프도 같이 멈춥니다. 이를 막으려면
+[UptimeRobot](https://uptimerobot.com) 같은 외부 핑 서비스로 슬립되기 전에 주기적으로
+요청을 보내야 합니다 (아래 E 참고). 두 방식의 트레이드오프:
 
-| | **Starter + 영구 디스크** | **Free + UptimeRobot** |
+| | **Free + UptimeRobot** | **Starter + 영구 디스크** |
 |---|---|---|
-| 비용 | 최소 $7/월 | 무료 |
-| 슬립 방지 | 애초에 슬립 안 함 | [UptimeRobot](https://uptimerobot.com) 같은 외부 핑으로 15분 내에 계속 요청을 보내야 함 (아래 E 참고) |
-| 상태 영속성 | 영구 디스크 사용 시 재배포/재시작에도 `data/state.json`·`logs/` 유지 | **없음.** 슬립되거나(핑 실패/지연), 재배포되거나, 크래시 나면 초기화됨 |
-| 월 사용량 한도 | 한도 없음 | Render 계정 전체에서 무료 인스턴스 750시간/월 공유 (24시간 서비스 하나만 있어도 거의 꽉 참) |
+| 비용 | 무료 | 최소 $7/월 + 디스크 비용(1GB 기준 약 $0.25/월) |
+| 슬립 방지 | 핑이 15분 내에 계속 도착해야 함 (실패하면 슬립 → 재기동) | 애초에 슬립 안 함 |
+| 상태 영속성 | **없음.** 슬립되거나(핑 실패/지연), 재배포되거나, 크래시 나면 `data/state.json`·`logs/`가 초기화됨 | 영구 디스크 사용 시 재배포/재시작에도 유지됨 |
+| 월 사용량 한도 | Render 계정 전체에서 무료 인스턴스 750시간/월 공유 (24시간 서비스 하나만 있어도 거의 꽉 참) | 한도 없음 |
 
-**Starter + 영구 디스크를 쓰면** (지금 `render.yaml` 기본값):
-- `data/state.json`·`logs/decisions.jsonl`이 재배포/재시작에도 유지되므로, 대시보드의
-  "성과 리뷰(예측 정확도)" 카드가 코드를 계속 고쳐 나가도 데이터가 안 날아가고 누적됩니다.
-  Free 플랜에서는 코드를 자주 배포할 때마다 이 기록이 초기화돼서 승률 분석이 사실상
-  불가능했습니다.
-- `data/`·`logs/` 디렉토리가 `/var/data`(영구 디스크)로 옮겨졌으니, 배포 전에 Render
-  대시보드에서 **디스크가 실제로 붙어있는지**(Disks 탭) 확인하세요.
-
-**Free + UptimeRobot으로 되돌리고 싶다면** `render.yaml`에서 `plan: starter`를 `plan: free`로
-바꾸고 `envVars`의 `DATA_DIR`/`LOG_DIR`와 `disk` 블록을 지우면 됩니다 (free 플랜은 디스크를
-지원하지 않아 Blueprint 적용이 실패합니다). 이 경우 위 표의 Free 쪽 제약이 다시 적용됩니다.
+**Free + UptimeRobot을 선택했다면** (지금 `render.yaml` 기본값) 다음을 감안하세요:
+- 실제 포지션의 SL/TP는 항상 Bybit 거래소 서버에 주문으로 걸려 있으므로, 봇 프로세스가
+  멈춰도(슬립/재기동 중) 청산 자체는 거래소가 대신 집행합니다.
+- 하지만 **"일일 손실 한도 도달 시 신규 진입 중단"** 로직은 `data/state.json`의
+  `daily.realized_pnl`을 기준으로 판단하는데, 슬립 후 재기동되면 이 값이 사라져 한도가
+  리셋됩니다. 즉 한도 보호가 완벽하지 않을 수 있습니다.
+- 코드를 자주 배포하는 동안은 `logs/decisions.jsonl`(성과 리뷰용 진입/청산 기록)도 매번
+  초기화되므로, 대시보드의 "성과 리뷰(예측 정확도)" 카드로 승률을 분석하려면 **한동안
+  재배포 없이 안정적으로 운영**해야 데이터가 쌓입니다.
+- 실거래 규모를 키우거나 승률 분석용 데이터를 안정적으로 쌓고 싶다면 Starter +
+  영구 디스크로 전환하는 걸 고려해보세요. 전환하려면 `render.yaml`에서 `plan: free`를
+  `plan: starter`로 바꾸고 아래를 추가하면 됩니다:
+  ```yaml
+      envVars:
+        - key: DATA_DIR
+          value: /var/data/data
+        - key: LOG_DIR
+          value: /var/data/logs
+      disk:
+        name: bybit-bot-data
+        mountPath: /var/data
+        sizeGB: 1
+  ```
 
 ### D. 대시보드 접속
 
