@@ -170,7 +170,7 @@ trade_management:
 loop:
   fast_poll_sec: 8          # price/emergency-exit checks while a position is open
   idle_poll_sec: 20         # checks while flat, waiting for an entry signal
-  signal_refresh_sec: 120   # how often to recompute the full multi-factor signal
+  signal_refresh_sec: 30    # how often to recompute the full multi-factor signal
 
 dashboard:
   enabled: true
