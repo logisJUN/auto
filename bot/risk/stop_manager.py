@@ -37,6 +37,8 @@ def new_trade(symbol: str, side: str, entry_price: float, qty: float, atr: float
         "breakeven_moved": False,
         "trailing_active": False,
         "tp_extensions_used": 0,
+        "partial_tp_taken": False,
+        "partial_realized_pnl": 0.0,
         "opened_at": time.time(),
     }
 
@@ -130,7 +132,7 @@ def check_stale_position(trade: dict, current_price: float, cfg: dict, capital_p
     return moved_pct <= max_move_pct
 
 
-def _profit_r(trade: dict, current_price: float) -> float:
+def profit_r(trade: dict, current_price: float) -> float:
     r = trade["risk_distance"]
     if r <= 0:
         return 0.0
@@ -145,11 +147,11 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
     """
     side = trade["side"]
     result = {"sl_changed": False, "tp_changed": False, "reason": ""}
-    profit_r = _profit_r(trade, current_price)
+    cur_profit_r = profit_r(trade, current_price)
     atr = max(atr, 1e-9)
 
     breakeven_rr = cfg.get("breakeven_after_rr", 0.5)
-    if not trade["breakeven_moved"] and profit_r >= breakeven_rr:
+    if not trade["breakeven_moved"] and cur_profit_r >= breakeven_rr:
         entry = trade["entry_price"]
         improves = (side == "long" and entry > trade["current_sl"]) or (side == "short" and entry < trade["current_sl"])
         if improves:
@@ -159,7 +161,7 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
             result["reason"] += "breakeven;"
 
     trail_rr = cfg.get("trail_activation_rr", 1.0)
-    if profit_r >= trail_rr:
+    if cur_profit_r >= trail_rr:
         trade["trailing_active"] = True
         trail_mult = cfg.get("trail_atr_multiplier", 1.2)
         if side == "long":

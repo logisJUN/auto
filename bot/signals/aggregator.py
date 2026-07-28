@@ -1,4 +1,5 @@
-"""Combines technical, volume, news and polymarket signals into one decision.
+"""Combines technical, volume, news, polymarket, and funding-rate signals into
+one decision.
 
 Each sub-signal contributes a score in [-1, 1] (positive = bullish). A signal's
 influence on the final result is its configured weight times its own confidence,
@@ -13,17 +14,20 @@ against this value before the bot will ever open a trade.
 from __future__ import annotations
 
 
-def aggregate(technical: dict, news: dict, polymarket: dict, weights: dict) -> dict:
+def aggregate(technical: dict, news: dict, polymarket: dict, weights: dict, funding: dict | None = None) -> dict:
+    funding = funding or {"score": 0.0, "confidence": 0.0}
     w_tech = weights.get("technical", 0.45)
     w_vol = weights.get("volume", 0.15)
     w_news = weights.get("news", 0.20)
     w_poly = weights.get("polymarket", 0.20)
+    w_funding = weights.get("funding", 0.0)
 
     components = {
         "technical": {"score": technical["score"], "confidence": 1.0, "weight": w_tech},
         "volume": {"score": technical.get("volume_score", 0.0), "confidence": 1.0, "weight": w_vol},
         "news": {"score": news["score"], "confidence": news["confidence"], "weight": w_news},
         "polymarket": {"score": polymarket["score"], "confidence": polymarket["confidence"], "weight": w_poly},
+        "funding": {"score": funding["score"], "confidence": funding["confidence"], "weight": w_funding},
     }
 
     eff_weight_sum = 0.0
@@ -73,4 +77,5 @@ def aggregate(technical: dict, news: dict, polymarket: dict, weights: dict) -> d
         "components": components,
         "news_sample": news.get("sample", []),
         "polymarket_sample": polymarket.get("sample", []),
+        "funding_rate": funding.get("funding_rate"),
     }

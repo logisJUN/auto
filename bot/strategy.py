@@ -14,7 +14,7 @@ from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import compute_performance_summary, log_decision
 from bot.notify import Notifier
 from bot.risk import position_sizing, stop_manager
-from bot.signals import aggregator, technical, universe
+from bot.signals import aggregator, funding, technical, universe
 from bot.signals.news import NewsSignal
 from bot.signals.polymarket import PolymarketSignal
 from bot.state import StateStore
@@ -80,8 +80,10 @@ class Strategy:
         tech = technical.multi_timeframe_score(klines, timeframes, tech_cfg)
         news = self.news_signal.score_for_symbol(symbol)
         poly = self.polymarket_signal.score()
+        funding_rate = self.client.get_funding_rate(symbol)
+        fund = funding.score(funding_rate, self.signals_cfg.get("funding", {}))
         weights = self.signals_cfg.get("weights", {})
-        return aggregator.aggregate(tech, news, poly, weights)
+        return aggregator.aggregate(tech, news, poly, weights, funding=fund)
 
     def get_signal(self, symbol: str, force: bool = False) -> dict:
         cache = self._signal_cache.setdefault(symbol, SignalCache())
@@ -170,6 +172,16 @@ class Strategy:
 
         signal = self.get_signal(symbol)
         if signal["atr"] <= 0 or signal["close"] <= 0:
+            return
+
+        # Below this, the likely move over a trade's lifetime doesn't clearly
+        # clear the round-trip taker fee -- entering is +EV noise at best. Skips
+        # both trend and range entries; a dead/chopping market is dead for either.
+        atr_pct = signal["atr"] / signal["close"] * 100.0
+        min_atr_pct = self.risk_cfg.get("min_volatility_atr_pct", 0.0)
+        if atr_pct < min_atr_pct:
+            logger.debug("skip entry %s: volatility too low (ATR=%.4f%% < min %.4f%%)",
+                         symbol, atr_pct, min_atr_pct)
             return
 
         min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
@@ -440,18 +452,68 @@ class Strategy:
 
         self.state.add_realized_pnl(pnl)
         self.state.set_trade(symbol, None)
+        # trade["pnl"] reported below is the WHOLE trade's realized pnl, including
+        # any earlier partial take-profit leg -- that leg's pnl was already booked
+        # into state via add_realized_pnl() when it happened, so it's not re-added
+        # here, only folded into the number shown/recorded for this trade.
+        total_pnl = pnl + trade.get("partial_realized_pnl", 0.0)
         self.state.record_closed_trade({
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
-            "exit_price": exit_price, "qty": trade["qty"], "pnl": pnl, "reason": reason,
+            "exit_price": exit_price, "qty": trade["qty"], "pnl": total_pnl, "reason": reason,
             "pnl_is_estimate": pnl_is_estimate, "closed_at": time.time(),
         })
 
         est_tag = " (est.)" if pnl_is_estimate else ""
-        msg = f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} PnL={pnl:+.4f} USDT{est_tag}"
+        msg = f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} PnL={total_pnl:+.4f} USDT{est_tag}"
         logger.info(msg)
         self.notifier.send(msg)
         log_decision(self.log_dir, {"event": "exit", "symbol": symbol, "reason": reason,
-                                     "exit_price": exit_price, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
+                                     "exit_price": exit_price, "pnl": total_pnl, "pnl_is_estimate": pnl_is_estimate})
+
+    def _take_partial_profit(self, symbol: str, trade: dict, fraction: float):
+        """Closes `fraction` of the position at market to lock in realized profit,
+        leaving the rest open under the same SL and to keep riding trailing/TP
+        extension. Skipped (not a full close) if either resulting leg would round
+        below the exchange's min qty -- better to just keep riding the whole
+        position than leave unclosable dust.
+        """
+        inst = self.client.get_instrument_info(symbol)
+        partial_qty = self.client.round_qty(symbol, trade["qty"] * fraction)
+        remaining_qty = self.client.round_qty(symbol, trade["qty"] - partial_qty)
+        if partial_qty < inst.min_qty or remaining_qty < inst.min_qty:
+            return
+
+        try:
+            self.client.close_position(symbol, trade["side"], partial_qty)
+        except BybitAPIError as exc:
+            logger.error("failed to take partial profit on %s: %s", symbol, exc)
+            return
+
+        closed = self.client.get_closed_pnl(symbol)
+        if closed and closed["updated_time_ms"] / 1000.0 >= trade["opened_at"]:
+            pnl = closed["closed_pnl"]
+        else:
+            try:
+                price = self.client.get_last_price(symbol)
+            except BybitAPIError:
+                price = trade["entry_price"]
+            if trade["side"] == "long":
+                pnl = (price - trade["entry_price"]) * partial_qty
+            else:
+                pnl = (trade["entry_price"] - price) * partial_qty
+
+        self.state.add_realized_pnl(pnl)
+        trade["qty"] = remaining_qty
+        trade["partial_tp_taken"] = True
+        trade["partial_realized_pnl"] = trade.get("partial_realized_pnl", 0.0) + pnl
+        self.state.set_trade(symbol, trade)
+
+        msg = (f"[부분익절] {symbol} {trade['side'].upper()} {partial_qty} 청산 "
+               f"(잔여 {remaining_qty}) PnL={pnl:+.4f} USDT")
+        logger.info(msg)
+        self.notifier.send(msg)
+        log_decision(self.log_dir, {"event": "partial_take_profit", "symbol": symbol,
+                                     "qty": partial_qty, "remaining_qty": remaining_qty, "pnl": pnl})
 
     def _repair_sl_tp(self, symbol: str, sl_price: float, tp_price: float) -> bool:
         """Attempts to (re)attach SL/TP to a position that's missing one or both
@@ -514,9 +576,17 @@ class Strategy:
         if trade.get("is_range_trade"):
             # range/scalp trades exit only via their (tight) exchange SL/TP, the
             # shared flash-move/reversal/stale-timeout checks above -- no riding
-            # the trade further with breakeven/trailing/TP-extension.
+            # the trade further with breakeven/trailing/TP-extension/partial-TP.
             self.state.set_trade(symbol, trade)
             return
+
+        partial_cfg = self.trade_cfg.get("partial_tp", {})
+        if partial_cfg.get("enabled", False) and not trade.get("partial_tp_taken", False):
+            if stop_manager.profit_r(trade, price) >= partial_cfg.get("at_rr", 1.0):
+                self._take_partial_profit(symbol, trade, partial_cfg.get("close_fraction", 0.5))
+                trade = self.state.get_trade(symbol)
+                if trade is None:  # shouldn't happen, but don't operate on a closed trade
+                    return
 
         atr = signal.get("atr") or trade["risk_distance"]
         update = stop_manager.update_trailing_and_tp(trade, price, atr, signal, self.trade_cfg)

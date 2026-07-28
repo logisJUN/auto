@@ -38,3 +38,26 @@ def test_low_confidence_news_has_less_influence_than_high_confidence():
     low_conf = aggregator.aggregate(technical, {"score": -0.9, "confidence": 0.1, "sample": []}, poly, WEIGHTS)
     high_conf = aggregator.aggregate(technical, {"score": -0.9, "confidence": 0.9, "sample": []}, poly, WEIGHTS)
     assert abs(high_conf["score"]) > abs(low_conf["score"])
+
+
+def test_missing_funding_arg_behaves_like_before_funding_existed():
+    technical = {"score": 0.8, "atr": 1.0, "close": 100.0, "volume_score": 0.5}
+    news = {"score": 0.6, "confidence": 0.8, "sample": []}
+    poly = {"score": 0.5, "confidence": 0.6, "sample": []}
+    result = aggregator.aggregate(technical, news, poly, WEIGHTS)
+    assert result["funding_rate"] is None
+    assert result["components"]["funding"]["weight"] == 0.0
+
+
+def test_extreme_contrarian_funding_pulls_score_toward_its_own_direction():
+    technical = {"score": 0.7, "atr": 1.0, "close": 100.0, "volume_score": 0.0}
+    news = {"score": 0.0, "confidence": 0.0, "sample": []}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+    weights_with_funding = {**WEIGHTS, "funding": 0.5}
+
+    no_funding = aggregator.aggregate(technical, news, poly, weights_with_funding,
+                                       funding={"score": 0.0, "confidence": 0.0})
+    bearish_funding = aggregator.aggregate(technical, news, poly, weights_with_funding,
+                                            funding={"score": -1.0, "confidence": 1.0, "funding_rate": 0.0005})
+    assert bearish_funding["score"] < no_funding["score"]
+    assert bearish_funding["funding_rate"] == 0.0005

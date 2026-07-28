@@ -72,16 +72,23 @@ risk:
   max_concurrent_positions: 4
   # minimum aggregated confidence (0-1) required to open a position at all.
   min_confidence_to_enter: 0.55
+  # skip entries entirely (trend or range) when the execution-timeframe ATR is
+  # below this % of price -- a dead/chopping market where the likely move
+  # doesn't clearly clear the ~0.11% round-trip taker fee. 0 disables this check.
+  min_volatility_atr_pct: 0.15
   # minimum notional order size in quote currency (USDT). Trades smaller than
   # this are skipped rather than sent (avoids exchange min-qty rejects).
   min_order_notional_usdt: 5.0
 
 signals:
   weights:
-    technical: 0.45
-    volume: 0.15
-    news: 0.20
+    technical: 0.40
+    volume: 0.10
+    news: 0.15
     polymarket: 0.20
+    # contrarian crowd-positioning signal (see signals.funding below) --
+    # deliberately a secondary/damping weight, not a primary direction-caller.
+    funding: 0.15
   technical:
     timeframes: ["15", "60", "240"]   # minutes; last one weighted heaviest (trend filter)
     rsi_period: 14
@@ -104,6 +111,11 @@ signals:
     keywords: ["bitcoin", "ethereum", "crypto", "fed ", "interest rate", "recession"]
     refresh_minutes: 15
     max_markets: 40
+  funding:
+    # perpetual funding rate (%, per interval) treated as "extreme" -- the
+    # contrarian score/confidence saturate at +-this. Bybit funding on
+    # BTC/ETH is typically within +-0.02-0.05% outside real FOMO/panic spikes.
+    normalize_pct: 0.05
 
 trade_management:
   # initial stop distance = atr * this multiplier
@@ -114,6 +126,16 @@ trade_management:
   # start trailing (move SL to breakeven and beyond).
   breakeven_after_rr: 0.5
   trail_activation_rr: 1.0
+  # lock in profit on part of the position once it reaches at_rr multiples of
+  # initial risk, closing close_fraction of the qty at market and letting the
+  # rest keep riding (still eligible for breakeven/trailing/TP-extension
+  # afterward). Skipped for a trade whose remaining/partial qty would round
+  # below the exchange's min order size -- rides the whole position instead.
+  # Not applied to range/scalp trades (see is_range_trade below).
+  partial_tp:
+    enabled: true
+    at_rr: 1.0
+    close_fraction: 0.5
   # how far (in ATR) to push SL behind price once trailing is active.
   trail_atr_multiplier: 1.2
   # if signals/momentum still strongly favor the position when price nears TP,

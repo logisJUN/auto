@@ -120,6 +120,24 @@ class BybitClient:
         except (KeyError, ValueError, TypeError):
             return None
 
+    def get_funding_rate(self, symbol: str) -> float | None:
+        """Current perpetual funding rate for `symbol` (e.g. 0.0001 = 0.01% per
+        interval), or None if unavailable. Used as a contrarian crowd-positioning
+        signal -- extreme positive funding means longs are paying heavily to stay
+        long (a crowded trade prone to squeezes/pullbacks) and vice versa.
+        """
+        try:
+            result = self._call(self.session.get_tickers, category=self.category, symbol=symbol)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["fundingRate"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def get_instrument_info(self, symbol: str) -> InstrumentInfo:
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
