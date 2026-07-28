@@ -35,6 +35,75 @@ _STRESS_CACHE_TTL_SEC = 300
 _stress_cache = {"ts": 0.0, "data": None}
 
 
+def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict) -> list[dict]:
+    """Always-visible status for the pinned symbols (BTCUSDT/ETHUSDT), regardless
+    of whether a position is currently open -- unlike the "open positions" table
+    below, which only lists symbols with a live trade.
+    """
+    out = []
+    for symbol in symbols:
+        try:
+            price = client.get_last_price(symbol)
+        except BybitAPIError:
+            price = None
+        trade = trades.get(symbol)
+        if trade is None:
+            out.append({"symbol": symbol, "price": price, "status": "flat"})
+            continue
+        if price is not None:
+            unrealized = (price - trade["entry_price"]) * trade["qty"] if trade["side"] == "long" \
+                else (trade["entry_price"] - price) * trade["qty"]
+        else:
+            unrealized = None
+        out.append({
+            "symbol": symbol, "price": price, "status": "open",
+            "side": trade["side"], "entry_price": trade["entry_price"], "unrealized": unrealized,
+        })
+    return out
+
+
+def _build_equity_curve(history: list[dict]) -> dict | None:
+    """SVG polyline of cumulative realized PnL over time, in chronological order,
+    from state.history (closed-trade summaries). Not a full tick-by-tick equity
+    curve (unrealized swings between closes aren't captured, and this resets
+    whenever state.json is reset -- e.g. a Render free-plan disk wipe), but it's
+    the only "account trend over time" data actually persisted, and needs no new
+    tracking to show.
+    """
+    ordered = sorted(history, key=lambda h: h.get("closed_at", 0.0))
+    if len(ordered) < 2:
+        return None
+
+    points = []
+    cum = 0.0
+    for h in ordered:
+        cum += h.get("pnl") or 0.0
+        points.append((h.get("closed_at", 0.0), cum))
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points] + [0.0]  # always include the zero baseline in range
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    x_range = (x_max - x_min) or 1.0
+    y_range = (y_max - y_min) or 1.0
+
+    width, height, pad = 600, 160, 10
+
+    def sx(x):
+        return pad + (x - x_min) / x_range * (width - 2 * pad)
+
+    def sy(y):
+        return height - pad - (y - y_min) / y_range * (height - 2 * pad)
+
+    svg_points = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in points)
+    last_cum = points[-1][1]
+    return {
+        "svg_points": svg_points, "width": width, "height": height,
+        "zero_y": round(sy(0.0), 1), "min_pnl": y_min, "max_pnl": y_max,
+        "last_cum": last_cum, "point_count": len(points),
+    }
+
+
 def _get_stress_test(equity: float, open_symbols: list[str]) -> dict | None:
     now = time.time()
     if _stress_cache["data"] is None or now - _stress_cache["ts"] > _STRESS_CACHE_TTL_SEC:
@@ -89,6 +158,26 @@ TEMPLATE = """
   </div>
 
   <div class="card">
+    <h2 style="font-size:1rem;">감시 종목</h2>
+    <div class="grid">
+      {% for w in watchlist %}
+      <div>
+        <div class="stat-label">{{ w.symbol }}</div>
+        <div class="stat-value">{{ '%.4f'|format(w.price) if w.price is not none else '조회 실패' }}</div>
+        {% if w.status == 'open' %}
+        <div class="small {{ 'pos-long' if w.side == 'long' else 'pos-short' }}">
+          {{ w.side.upper() }} 진입 {{ w.entry_price }}
+          {% if w.unrealized is not none %} / 미실현 <span class="{{ 'pnl-pos' if w.unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(w.unrealized) }}</span>{% endif %}
+        </div>
+        {% else %}
+        <div class="small">관망 중 - 진입 신호 대기</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
     <h2 style="font-size:1rem;">열린 포지션</h2>
     {% if positions %}
     <table>
@@ -108,6 +197,47 @@ TEMPLATE = """
     </table>
     {% else %}
     <div class="small">현재 열린 포지션 없음 - 진입 신호 대기 중</div>
+    {% endif %}
+  </div>
+
+  {% if equity_curve %}
+  <div class="card">
+    <h2 style="font-size:1rem;">손익 변동 추이 (누적 실현손익)</h2>
+    <svg viewBox="0 0 {{ equity_curve.width }} {{ equity_curve.height }}" style="width:100%; height:auto;">
+      <line x1="0" y1="{{ equity_curve.zero_y }}" x2="{{ equity_curve.width }}" y2="{{ equity_curve.zero_y }}"
+            stroke="#30363d" stroke-width="1" stroke-dasharray="4 3" />
+      <polyline points="{{ equity_curve.svg_points }}" fill="none"
+                stroke="{{ '#7ee787' if equity_curve.last_cum >= 0 else '#ff7b72' }}" stroke-width="2" />
+    </svg>
+    <div class="grid" style="margin-top:4px;">
+      <div><div class="stat-label">누적 실현손익</div><div class="stat-value {{ 'pnl-pos' if equity_curve.last_cum >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(equity_curve.last_cum) }}</div></div>
+      <div><div class="stat-label">최고</div><div class="stat-value pnl-pos">{{ '%.4f'|format(equity_curve.max_pnl) }}</div></div>
+      <div><div class="stat-label">최저</div><div class="stat-value pnl-neg">{{ '%.4f'|format(equity_curve.min_pnl) }}</div></div>
+    </div>
+    <div class="small">청산된 거래 {{ equity_curve.point_count }}건 기준 (미실현 손익 변동은 반영 안 됨). 상태 초기화 시 리셋됩니다.</div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2 style="font-size:1rem;">거래 이력</h2>
+    {% if trade_history %}
+    <table>
+      <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>손익</th><th>사유</th></tr>
+      {% for t in trade_history %}
+      <tr>
+        <td class="small">{{ t.time_str }}</td>
+        <td>{{ t.symbol }}</td>
+        <td class="{{ 'pos-long' if t.side == 'long' else 'pos-short' }}">{{ t.side.upper() }}</td>
+        <td>{{ t.entry_price }}</td>
+        <td>{{ t.exit_price }}</td>
+        <td>{{ t.qty }}</td>
+        <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
+        <td class="small">{{ t.reason }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="small">아직 청산된 거래가 없습니다.</div>
     {% endif %}
   </div>
 
@@ -252,6 +382,17 @@ def index():
             "summary": _decision_summary(d),
         })
 
+    watched_symbols = cfg.get("exchange", "symbols", default=[])
+    watchlist = _build_watchlist(client, watched_symbols, snapshot.get("trades", {}))
+
+    trade_history = []
+    for t in sorted(snapshot.get("history", []), key=lambda h: h.get("closed_at", 0.0), reverse=True)[:50]:
+        trade_history.append({
+            **t,
+            "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(t.get("closed_at", time.time()))),
+        })
+    equity_curve = _build_equity_curve(snapshot.get("history", []))
+
     stress = _get_stress_test(equity, list(snapshot.get("trades", {}).keys())) if equity > 0 else None
     perf = compute_performance_summary(log_dir)
 
@@ -265,6 +406,9 @@ def index():
         open_count=len(positions),
         max_positions=cfg.get("risk", "max_concurrent_positions", default=1),
         positions=positions,
+        watchlist=watchlist,
+        trade_history=trade_history,
+        equity_curve=equity_curve,
         decisions=decisions,
         stress=stress,
         perf=perf,
