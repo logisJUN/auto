@@ -169,6 +169,11 @@ trade_management:
   stale_exit_after_min: 60
   stale_exit_after_min_no_pressure: 240
   stale_exit_max_move_pct: 0.5
+  # after a stale_timeout close, block a same-symbol/same-direction re-entry for
+  # this many minutes -- prevents immediately re-opening the same going-nowhere
+  # trade and repeating the round-trip fee in a tight, choppy range. A genuine
+  # reversal (signal now favors the other side) is not blocked. 0 disables this.
+  stale_reentry_cooldown_min: 30
 
   # Range/mean-reversion scalp entries, only tried when the trend signal
   # (technical+news+polymarket) is neutral. Enter long near the recent range

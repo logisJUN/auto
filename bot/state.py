@@ -23,6 +23,7 @@ def default_state() -> dict:
         "trades": {},       # symbol -> trade dict (see risk/stop_manager.new_trade)
         "daily": {"date": _today_utc(), "start_equity": None, "realized_pnl": 0.0},
         "history": [],      # list of closed-trade summaries (kept short)
+        "stale_cooldowns": {},  # symbol -> {"side": ..., "until_ts": ...}
     }
 
 
@@ -92,6 +93,20 @@ class StateStore:
             return 0.0
         pnl = daily.get("realized_pnl", 0.0)
         return max(0.0, -pnl / start * 100.0)
+
+    # -- stale-exit re-entry cooldown ---------------------------------------------------------
+    def set_stale_cooldown(self, symbol: str, side: str, until_ts: float):
+        """Records that `symbol` was just closed for going nowhere (stale_timeout)
+        while positioned `side` -- until_ts blocks a same-direction re-entry until
+        then, so the bot doesn't immediately re-open the same losing, going-nowhere
+        trade and repeat the round-trip fee (observed live: a symbol stuck in a
+        tight range kept getting shorted, stale-timed-out, and re-shorted).
+        """
+        self._state["stale_cooldowns"][symbol] = {"side": side, "until_ts": until_ts}
+        self.save()
+
+    def get_stale_cooldown(self, symbol: str) -> dict | None:
+        return self._state.get("stale_cooldowns", {}).get(symbol)
 
     # -- misc ---------------------------------------------------------
     def get_last_summary_date(self) -> str | None:

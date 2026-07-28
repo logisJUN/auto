@@ -187,6 +187,17 @@ class Strategy:
         min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
         is_trend_candidate = signal["direction"] != "neutral" and signal["confidence"] >= min_conf
 
+        # Don't immediately re-open the same losing, going-nowhere trade right after
+        # a stale_timeout close -- observed live as a symbol stuck in a tight range
+        # getting shorted, stale-timed-out, and re-shorted in a fee-bleeding loop.
+        # Only blocks a re-entry in the SAME direction; a genuine reversal (signal
+        # now favors the other side) is unaffected.
+        if is_trend_candidate:
+            cooldown = self.state.get_stale_cooldown(symbol)
+            if cooldown and cooldown.get("side") == signal["direction"] and time.time() < cooldown.get("until_ts", 0):
+                logger.debug("skip entry %s: cooling down after a stale-timeout exit on the same side", symbol)
+                return
+
         # "No room" means either every slot is used, or -- more commonly at a high
         # position_size_pct_of_equity + margin_buffer_pct combo -- there's simply no
         # margin headroom left even though a slot count is technically free.
@@ -449,6 +460,11 @@ class Strategy:
             pnl_is_estimate = True
             logger.warning("no exchange closed-pnl record yet for %s, using price-based "
                             "estimate (fees not included)", symbol)
+
+        if reason == "stale_timeout":
+            cooldown_min = self.trade_cfg.get("stale_reentry_cooldown_min", 30)
+            if cooldown_min > 0:
+                self.state.set_stale_cooldown(symbol, trade["side"], time.time() + cooldown_min * 60)
 
         self.state.add_realized_pnl(pnl)
         self.state.set_trade(symbol, None)
