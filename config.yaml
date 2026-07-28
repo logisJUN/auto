@@ -78,10 +78,10 @@ risk:
 
 signals:
   weights:
-    technical: 0.20
+    technical: 0.45
     volume: 0.15
     news: 0.20
-    polymarket: 0.45
+    polymarket: 0.20
   technical:
     timeframes: ["15", "60", "240"]   # minutes; last one weighted heaviest (trend filter)
     rsi_period: 14
