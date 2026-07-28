@@ -8,10 +8,28 @@ def test_seed_daily_sets_values_directly(tmp_path):
     assert daily == {"date": "2026-01-01", "start_equity": 100.0, "realized_pnl": -5.0}
 
 
-def test_daily_loss_pct_reflects_seeded_values(tmp_path):
+def test_daily_loss_pct_reflects_current_equity_vs_start(tmp_path):
     state = StateStore(str(tmp_path / "state.json"))
     state.seed_daily("2026-01-01", start_equity=100.0, realized_pnl=-8.0)
-    assert state.daily_loss_pct() == 8.0
+    assert state.daily_loss_pct(current_equity=92.0) == 8.0
+
+
+def test_daily_loss_pct_includes_unrealized_loss_not_just_realized(tmp_path):
+    """The whole point of basing this on live equity instead of realized_pnl:
+    a big unrealized loss on a still-open position must count toward the
+    daily-loss limit, not just what's already been closed.
+    """
+    state = StateStore(str(tmp_path / "state.json"))
+    state.seed_daily("2026-01-01", start_equity=100.0, realized_pnl=-2.0)
+    # realized_pnl alone would say only 2% down, but equity reflects an
+    # additional 6% of unrealized loss sitting on an open position
+    assert state.daily_loss_pct(current_equity=92.0) == 8.0
+
+
+def test_daily_loss_pct_zero_when_equity_recovered_above_start(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    state.seed_daily("2026-01-01", start_equity=100.0, realized_pnl=-8.0)
+    assert state.daily_loss_pct(current_equity=101.0) == 0.0
 
 
 def test_add_realized_pnl_accumulates_on_top_of_seeded_value(tmp_path):

@@ -101,9 +101,9 @@ class Strategy:
         return cache.result
 
     # -- entries ---------------------------------------------------------
-    def _daily_loss_breached(self) -> bool:
+    def _daily_loss_breached(self, equity: float) -> bool:
         limit = self.risk_cfg.get("max_daily_loss_pct", 8.0)
-        return self.state.daily_loss_pct() >= limit
+        return self.state.daily_loss_pct(equity) >= limit
 
     def _sync_daily_state(self, equity: float):
         """Keeps today's daily-loss-limit tracking accurate. The old behavior
@@ -167,7 +167,7 @@ class Strategy:
             return
         equity = self.client.get_equity_usdt()
         self._sync_daily_state(equity)
-        if self._daily_loss_breached():
+        if self._daily_loss_breached(equity):
             return
 
         signal = self.get_signal(symbol)

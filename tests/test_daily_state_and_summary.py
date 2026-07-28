@@ -99,6 +99,26 @@ def test_sync_daily_state_defaults_to_zero_on_exchange_failure(tmp_path):
     assert daily["start_equity"] == 100.0
 
 
+# -- _daily_loss_breached ---------------------------------------------------------
+
+def test_try_enter_blocked_by_unrealized_loss_even_when_realized_pnl_is_small(tmp_path):
+    """The daily-loss breach check must be based on live equity vs the day's
+    start_equity (realized + unrealized combined), not realized_pnl alone --
+    otherwise a big unrealized loss sitting on a still-open position would
+    never trip the circuit breaker just because nothing's been closed yet.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    from bot.strategy import _today_utc
+    state.seed_daily(_today_utc(), start_equity=100.0, realized_pnl=-2.0)
+    # realized_pnl alone says only -2% -- but equity is actually down 8%
+    # (an extra -6% sitting unrealized on an open position elsewhere)
+    client.get_equity_usdt.return_value = 92.0
+
+    strategy.try_enter("XUSDT")
+
+    client.open_position.assert_not_called()
+
+
 # -- _maybe_send_daily_summary ---------------------------------------------------------
 
 def test_daily_summary_noop_when_email_not_configured(tmp_path):

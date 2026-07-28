@@ -86,13 +86,19 @@ class StateStore:
         self._state["daily"]["realized_pnl"] = self._state["daily"].get("realized_pnl", 0.0) + pnl
         self.save()
 
-    def daily_loss_pct(self) -> float:
+    def daily_loss_pct(self, current_equity: float) -> float:
+        """% drop from today's start_equity to current_equity -- realized AND
+        unrealized combined, since Bybit's UNIFIED account equity is marked to
+        market in real time. Deliberately NOT based on realized_pnl alone: a
+        big unrealized loss sitting on a still-open position would otherwise
+        never trip the daily-loss circuit breaker (max_daily_loss_pct) just
+        because nothing's been closed yet.
+        """
         daily = self._state["daily"]
         start = daily.get("start_equity") or 0.0
         if start <= 0:
             return 0.0
-        pnl = daily.get("realized_pnl", 0.0)
-        return max(0.0, -pnl / start * 100.0)
+        return max(0.0, (start - current_equity) / start * 100.0)
 
     # -- stale-exit re-entry cooldown ---------------------------------------------------------
     def set_stale_cooldown(self, symbol: str, side: str, until_ts: float):

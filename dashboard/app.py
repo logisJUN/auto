@@ -359,7 +359,7 @@ def index():
 
     daily = snapshot.get("daily", {})
     daily_pnl = daily.get("realized_pnl", 0.0)
-    daily_loss_pct = state.daily_loss_pct()
+    daily_loss_pct = state.daily_loss_pct(equity)
 
     positions = []
     for symbol, trade in snapshot.get("trades", {}).items():
