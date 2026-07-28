@@ -6,7 +6,7 @@
 exchange:
   category: "linear"          # USDT perpetual futures
   # Always-watched symbols, regardless of the dynamic universe scan below.
-  symbols: ["ETHUSDT"]
+  symbols: ["BTCUSDT", "ETHUSDT"]
   # Instead of (or in addition to) a hand-picked symbol list, periodically scan
   # every Bybit USDT linear perpetual and watch whichever ones currently have
   # the highest 24h turnover (liquidity) -- one cheap bulk ticker call, not a
@@ -14,7 +14,7 @@ exchange:
   # of the refreshed list keeps being managed (SL/TP/trailing/stale-timeout)
   # until it closes -- it's just not eligible for new entries anymore.
   universe:
-    enabled: true
+    enabled: false
     top_n: 30
     rescan_interval_hours: 1
     # some newly-listed/lower-liquidity perpetuals charge double the standard
@@ -59,7 +59,8 @@ risk:
   # min, high confidence -> max), then capped by the exchange's own max leverage
   # for that symbol/margin tier.
   leverage_by_symbol:
-    ETHUSDT: {min: 8, max: 10}
+    BTCUSDT: {min: 10, max: 15}
+    ETHUSDT: {min: 10, max: 15}
   # leverage range for any symbol NOT listed in leverage_by_symbol above -- i.e.
   # everything picked up by the dynamic universe scan.
   default_leverage_range: {min: 5, max: 8}
