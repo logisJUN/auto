@@ -717,6 +717,17 @@ class Strategy:
         self._refresh_universe()
         self._reconcile_orphaned_positions()
         try:
+            # Must run unconditionally every tick, not only from try_enter(): if
+            # every watched symbol already has an open (e.g. just-adopted)
+            # position, try_enter() is never called for any of them, and a
+            # state reset's daily-loss reconstruction would otherwise never run
+            # at all -- observed live after a Render restart left today's
+            # realized-pnl stuck at 0 even though real losses had already
+            # happened earlier that day.
+            self._sync_daily_state(self.client.get_equity_usdt())
+        except BybitAPIError:
+            logger.exception("failed to sync daily state this tick")
+        try:
             self._maybe_send_daily_summary()
         except Exception:
             logger.exception("failed to send daily summary email")

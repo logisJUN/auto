@@ -135,3 +135,33 @@ def test_daily_summary_resends_on_a_new_day(tmp_path):
     strategy._maybe_send_daily_summary()
 
     assert strategy.email.send.call_count == 1
+
+
+# -- tick() must sync daily state even when no symbol is flat ---------------------------------------------------------
+
+def test_tick_syncs_daily_state_even_when_every_symbol_already_has_a_position(tmp_path):
+    """Regression test: _sync_daily_state used to be called only from
+    try_enter(), which is never reached for a symbol that already has an open
+    trade. If every watched symbol is already positioned (e.g. right after a
+    restart re-adopts orphaned positions), the daily-loss reconstruction must
+    still run from tick() itself, not be silently skipped for the whole tick.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    state.set_trade("XUSDT", {
+        "symbol": "XUSDT", "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "initial_sl": 95.0, "initial_tp": 110.0, "current_sl": 95.0, "current_tp": 110.0,
+        "risk_distance": 5.0, "entry_atr": 5.0, "breakeven_moved": False,
+        "trailing_active": False, "tp_extensions_used": 0, "partial_tp_taken": False,
+        "partial_realized_pnl": 0.0, "opened_at": 0.0,
+    })
+    client.get_equity_usdt.return_value = 98.5
+    client.get_all_open_positions.return_value = []
+    client.get_closed_pnl_since.return_value = [{"closedPnl": "-1.5"}]
+    strategy.manage_open_position = MagicMock()  # isolate: not under test here
+
+    strategy.tick()
+
+    client.get_closed_pnl_since.assert_called_once()
+    daily = state.snapshot()["daily"]
+    assert daily["realized_pnl"] == -1.5
+    strategy.manage_open_position.assert_called_once_with("XUSDT")
