@@ -28,17 +28,17 @@ risk:
   # equity * position_size_pct_of_equity / 100 * leverage.
   # NOTE: unlike a risk-per-trade-% scheme, the loss if SL is hit is NOT fixed to
   # a set % of equity here -- it depends on leverage and stop-loss distance.
-  # At 50% with no margin_buffer_pct reserve, the 2nd position gets whatever's
-  # left of equity (the other 50%) -- both symbols get a full allocation.
-  position_size_pct_of_equity: 50.0
+  # At 45% + a 10% margin_buffer_pct reserve (90% max in use), both BTCUSDT and
+  # ETHUSDT get a full 45% allocation with 10% always left as slack for fees/
+  # exchange-side margin requirements (e.g. $100 equity -> $45 + $45 + $10 spare).
+  position_size_pct_of_equity: 45.0
   # always keep at least this % of equity as an unused margin reserve. A new
   # position's margin is capped to min(position_size_pct_of_equity% of equity,
   # remaining headroom under this reserve) -- so it's sized down (or skipped)
   # instead of the exchange rejecting the order for insufficient available
-  # balance once other positions have already committed margin.
-  # Set to 0: no reserve -- the 2nd position gets 100% of whatever equity the
-  # 1st didn't use, not headroom shrunk by a buffer on top of that.
-  margin_buffer_pct: 0.0
+  # balance once other positions have already committed margin (ErrCode 110007,
+  # observed live with margin_buffer_pct at 0).
+  margin_buffer_pct: 10.0
   # if every slot is full (or margin headroom is gone) but a NEW trend signal on
   # some other symbol comes in strong, close the weakest currently-held position
   # and take that trade instead of just sitting out. "Weakest" = lowest current
