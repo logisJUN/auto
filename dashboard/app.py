@@ -151,6 +151,7 @@ TEMPLATE = """
   <div class="card">
     <div class="grid">
       <div><div class="stat-label">계좌 자산 (USDT)</div><div class="stat-value">{{ equity }}</div></div>
+      <div><div class="stat-label">총 미실현손익</div><div class="stat-value {{ 'pnl-pos' if total_unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(total_unrealized) }}</div></div>
       <div><div class="stat-label">오늘 실현 손익</div><div class="stat-value {{ 'pnl-pos' if daily_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(daily_pnl) }}</div></div>
       <div><div class="stat-label">오늘 손실률 / 한도</div><div class="stat-value">{{ '%.2f'|format(daily_loss_pct) }}% / {{ max_daily_loss_pct }}%</div></div>
       <div><div class="stat-label">보유 포지션</div><div class="stat-value">{{ open_count }} / {{ max_positions }}</div></div>
@@ -372,6 +373,8 @@ def index():
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized})
 
+    total_unrealized = sum(p["unrealized"] for p in positions)
+
     log_dir = os.getenv("LOG_DIR", "logs")
     decisions_raw = read_recent_decisions(log_dir, limit=30)
     decisions = []
@@ -400,6 +403,7 @@ def index():
         TEMPLATE,
         testnet=cfg.secrets.bybit_testnet,
         equity=round(equity, 4),
+        total_unrealized=total_unrealized,
         daily_pnl=daily_pnl,
         daily_loss_pct=daily_loss_pct,
         max_daily_loss_pct=cfg.get("risk", "max_daily_loss_pct", default=8.0),
