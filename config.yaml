@@ -82,13 +82,17 @@ risk:
 
 signals:
   weights:
-    technical: 0.40
+    technical: 0.50
     volume: 0.10
     news: 0.15
     polymarket: 0.20
     # contrarian crowd-positioning signal (see signals.funding below) --
-    # deliberately a secondary/damping weight, not a primary direction-caller.
-    funding: 0.15
+    # kept deliberately small: observed live pushing "short" through several
+    # hours of a grinding uptrend (funding stayed positive/crowded-long
+    # instead of reverting), racking up real losses fighting a trend that
+    # hadn't actually exhausted yet. Still present as a minor damper, not a
+    # primary direction-caller.
+    funding: 0.05
   technical:
     timeframes: ["15", "60", "240"]   # minutes; last one weighted heaviest (trend filter)
     rsi_period: 14
