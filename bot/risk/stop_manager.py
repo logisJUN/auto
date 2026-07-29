@@ -152,10 +152,20 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
 
     breakeven_rr = cfg.get("breakeven_after_rr", 0.5)
     if not trade["breakeven_moved"] and cur_profit_r >= breakeven_rr:
+        # A stop placed exactly at entry gets clipped by ordinary noise -- price
+        # revisiting its own entry level is common even mid-trend, so an
+        # unbuffered breakeven stop tends to whipsaw out on noise rather than a
+        # real reversal. Offsetting it slightly past entry (in the favorable
+        # direction, scaled by ATR) both requires a real move to trigger and
+        # turns the "breakeven" stop into a small locked-in win instead of a
+        # small loss (net of fees) when it does.
+        buffer_mult = cfg.get("breakeven_buffer_atr_mult", 0.2)
         entry = trade["entry_price"]
-        improves = (side == "long" and entry > trade["current_sl"]) or (side == "short" and entry < trade["current_sl"])
+        breakeven_sl = entry + atr * buffer_mult if side == "long" else entry - atr * buffer_mult
+        improves = (side == "long" and breakeven_sl > trade["current_sl"]) or \
+                   (side == "short" and breakeven_sl < trade["current_sl"])
         if improves:
-            trade["current_sl"] = entry
+            trade["current_sl"] = breakeven_sl
             trade["breakeven_moved"] = True
             result["sl_changed"] = True
             result["reason"] += "breakeven;"

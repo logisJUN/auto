@@ -167,6 +167,27 @@ class BybitClient:
             raise BybitAPIError("no wallet balance data")
         return float(lst[0]["totalEquity"])
 
+    def get_available_balance_usdt(self) -> float | None:
+        """This account's real available margin balance for new orders, straight
+        from Bybit -- unlike equity, this already nets out whatever the exchange
+        itself reserves (funding, existing positions' margin, etc.), so it
+        catches drift our own local headroom estimate can't see. Returns None
+        if the field is missing or the lookup fails; callers should treat that
+        as "unknown" and fall back to the local estimate rather than blocking
+        entries outright.
+        """
+        try:
+            result = self._call(self.session.get_wallet_balance, accountType="UNIFIED")
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["totalAvailableBalance"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def get_position(self, symbol: str) -> dict | None:
         result = self._call(self.session.get_positions, category=self.category, symbol=symbol)
         for p in result.get("list", []):

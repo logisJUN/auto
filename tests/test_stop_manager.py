@@ -37,14 +37,23 @@ def test_new_trade_short_sets_sl_tp_above_below_entry():
     assert trade["initial_tp"] == 100 - 5.0
 
 
-def test_breakeven_moves_sl_to_entry_once_profitable_enough():
+def test_breakeven_moves_sl_past_entry_by_the_configured_buffer():
     trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
     neutral_signal = {"direction": "neutral", "score": 0.0, "confidence": 0.0}
     # profit_r = (101.6 - 100) / 3 = 0.53 >= breakeven_after_rr(0.5)
     result = stop_manager.update_trailing_and_tp(trade, 101.6, atr=2, agg_signal=neutral_signal, cfg=CFG)
     assert result["sl_changed"]
-    assert trade["current_sl"] == 100
+    # not exactly entry (100) -- buffered past it by atr(2)*breakeven_buffer_atr_mult(0.2) = 0.4
+    assert trade["current_sl"] == 100.4
     assert trade["breakeven_moved"]
+
+
+def test_breakeven_buffer_defaults_to_a_sensible_value_when_unconfigured():
+    cfg = {k: v for k, v in CFG.items() if k != "breakeven_buffer_atr_mult"}
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=cfg)
+    neutral_signal = {"direction": "neutral", "score": 0.0, "confidence": 0.0}
+    stop_manager.update_trailing_and_tp(trade, 101.6, atr=2, agg_signal=neutral_signal, cfg=cfg)
+    assert trade["current_sl"] > 100  # buffered past entry, not exactly at it
 
 
 def test_trailing_never_loosens_stop():

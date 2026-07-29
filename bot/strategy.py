@@ -68,6 +68,11 @@ class Strategy:
             email_from=cfg.secrets.email_from,
             email_to=cfg.secrets.email_to,
         )
+        # _margin_for_new_position is called multiple times per entry attempt
+        # (room check, then again when actually sizing) -- cache the exchange's
+        # real available-balance lookup briefly so that doesn't mean multiple
+        # extra API calls per tick.
+        self._available_balance_cache: dict = {"ts": 0.0, "value": None}
 
     # -- signal computation ---------------------------------------------------------
     def _fetch_klines_multi(self, symbol: str) -> dict[str, list[dict]]:
@@ -295,16 +300,39 @@ class Strategy:
             total += (trade["qty"] * trade["entry_price"]) / leverage
         return total
 
+    def _get_available_balance(self) -> float | None:
+        now = time.time()
+        cache = self._available_balance_cache
+        if now - cache["ts"] < 10.0:
+            return cache["value"]
+        try:
+            cache["value"] = self.client.get_available_balance_usdt()
+        except BybitAPIError:
+            cache["value"] = None
+        cache["ts"] = now
+        return cache["value"]
+
     def _margin_for_new_position(self, equity: float) -> float:
         """Target margin (position_size_pct_of_equity% of equity), capped so total
         margin in use never exceeds equity * (1 - margin_buffer_pct/100) -- i.e. a
         reserve is always kept free rather than every slot targeting its % of
         *total* equity independently and potentially over-committing.
+
+        Also capped by the exchange's own real available balance if known: our
+        local headroom estimate can drift from what Bybit actually allows
+        (funding fees, price moves since our last snapshot, exchange-side
+        margin requirements) -- observed live as repeated ErrCode 110007
+        ("insufficient margin") rejections even with a margin buffer in place.
         """
         buffer_pct = self.risk_cfg.get("margin_buffer_pct", 15.0)
         headroom = equity * (1 - buffer_pct / 100.0) - self._used_margin()
         target = equity * self.risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0
-        return max(0.0, min(target, headroom))
+        margin = max(0.0, min(target, headroom))
+
+        available = self._get_available_balance()
+        if available is not None:
+            margin = max(0.0, min(margin, available))
+        return margin
 
     def _has_capital_pressure(self) -> bool:
         """True if there's no room for a new position right now (every slot

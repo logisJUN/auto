@@ -1,8 +1,9 @@
-"""risk.min_volatility_atr_pct: skip entries (trend or range) when the
-execution-timeframe ATR is too small relative to price -- a dead/chopping
-market where the likely move doesn't clearly clear the round-trip taker fee,
-the exact failure mode diagnosed from a real SUIUSDT loss that matched its
-fee exactly.
+"""Strategy._margin_for_new_position also caps by the exchange's own real
+available balance (BybitClient.get_available_balance_usdt), not just the
+locally-computed headroom estimate -- our local estimate (used_margin summed
+from state) can drift from what Bybit actually allows (funding fees, price
+moves since our last snapshot), which showed up live as repeated ErrCode
+110007 ("insufficient margin") rejections even with a margin buffer.
 """
 from unittest.mock import MagicMock
 
@@ -20,7 +21,6 @@ RAW_CFG = {
         "leverage_by_symbol": {}, "default_leverage_range": {"min": 5, "max": 8},
         "max_daily_loss_pct": 8.0, "max_concurrent_positions": 4,
         "min_confidence_to_enter": 0.55, "min_order_notional_usdt": 5.0,
-        "min_volatility_atr_pct": 0.15,
     },
     "signals": {
         "weights": {"technical": 0.4, "volume": 0.1, "news": 0.15, "polymarket": 0.2, "funding": 0.15},
@@ -42,13 +42,6 @@ RAW_CFG = {
 }
 
 
-class FakeInst:
-    qty_step = 0.1
-    min_qty = 0.1
-    tick_size = 0.01
-    max_leverage = 25.0
-
-
 def _make_strategy(tmp_path):
     secrets = Secrets(bybit_api_key="x", bybit_api_secret="y", bybit_testnet=True,
                        newsapi_key=None, telegram_bot_token=None, telegram_chat_id=None,
@@ -57,50 +50,43 @@ def _make_strategy(tmp_path):
     state = StateStore(str(tmp_path / "state.json"))
     notifier = Notifier(None, None)
     client = MagicMock(spec=BybitClient)
-    client.get_equity_usdt.return_value = 1000.0
-    client.get_available_balance_usdt.return_value = 1_000_000.0
-    client.get_instrument_info.return_value = FakeInst()
-    client.round_price.side_effect = lambda symbol, price: round(price, 2)
-    client.round_qty.side_effect = lambda symbol, qty: round(qty, 1)
-    client.get_last_price.return_value = 100.0
-    client.open_position.return_value = {}
-    client.get_position.return_value = {
-        "symbol": "X", "side": "Buy", "size": 1.0, "entry_price": 100.0,
-        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
-    }
     return Strategy(client, cfg, state, notifier, str(tmp_path / "logs")), state, client
 
 
-def _signal(atr, confidence=0.9, direction="long"):
-    return {"score": confidence, "confidence": confidence, "direction": direction,
-            "atr": atr, "close": 100.0, "range_high": 0.0, "range_low": 0.0, "components": {}}
-
-
-def test_entry_skipped_when_atr_pct_below_floor(tmp_path):
+def test_margin_capped_by_exchange_available_balance(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    strategy.get_signal = lambda s, force=False: _signal(atr=0.05)  # 0.05% of 100 close
+    # local calc would target 50% of 1000 = 500, but the exchange says only 80 is really free
+    client.get_available_balance_usdt.return_value = 80.0
 
-    strategy.try_enter("XUSDT")
+    margin = strategy._margin_for_new_position(equity=1000.0)
 
-    assert client.open_position.called is False
-    assert state.get_trade("XUSDT") is None
+    assert margin == 80.0
 
 
-def test_entry_allowed_when_atr_pct_at_or_above_floor(tmp_path):
+def test_margin_unaffected_when_available_balance_exceeds_local_target(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    strategy.get_signal = lambda s, force=False: _signal(atr=0.5)  # 0.5% of 100 close
+    client.get_available_balance_usdt.return_value = 1_000_000.0
 
-    strategy.try_enter("XUSDT")
+    margin = strategy._margin_for_new_position(equity=1000.0)
 
-    assert client.open_position.called is True
-    assert state.get_trade("XUSDT") is not None
+    assert margin == 500.0  # local target (50% of equity) still binds
 
 
-def test_filter_disabled_when_min_atr_pct_is_zero(tmp_path):
+def test_margin_falls_back_to_local_calc_when_available_balance_unknown(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    strategy.risk_cfg["min_volatility_atr_pct"] = 0.0
-    strategy.get_signal = lambda s, force=False: _signal(atr=0.001)
+    client.get_available_balance_usdt.return_value = None
 
-    strategy.try_enter("XUSDT")
+    margin = strategy._margin_for_new_position(equity=1000.0)
 
-    assert client.open_position.called is True
+    assert margin == 500.0
+
+
+def test_available_balance_lookup_is_cached_briefly(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    client.get_available_balance_usdt.return_value = 80.0
+
+    strategy._margin_for_new_position(equity=1000.0)
+    strategy._margin_for_new_position(equity=1000.0)
+    strategy._margin_for_new_position(equity=1000.0)
+
+    assert client.get_available_balance_usdt.call_count == 1

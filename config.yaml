@@ -144,6 +144,12 @@ trade_management:
   # once unrealized profit reaches this multiple of the initial risk (R),
   # start trailing (move SL to breakeven and beyond).
   breakeven_after_rr: 0.5
+  # breakeven SL is placed this many ATR past entry (favorable direction), not
+  # exactly at entry -- an unbuffered breakeven stop gets clipped by ordinary
+  # noise (price revisiting its own entry level is common mid-trend), turning
+  # a real trend into a string of small losses. The buffer both requires a
+  # real move to trigger and locks in a small win instead when it does.
+  breakeven_buffer_atr_mult: 0.2
   trail_activation_rr: 1.0
   # lock in profit on part of the position once it reaches at_rr multiples of
   # initial risk, closing close_fraction of the qty at market and letting the

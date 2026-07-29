@@ -64,6 +64,7 @@ def _make_strategy(tmp_path):
     notifier = Notifier(None, None)
     client = MagicMock(spec=BybitClient)
     client.get_equity_usdt.return_value = 1000.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
     client.get_instrument_info.return_value = FakeInst()
     client.round_price.side_effect = lambda symbol, price: round(price, 2)
     # Real round_qty behavior (the thing under test): floor-then-round to the

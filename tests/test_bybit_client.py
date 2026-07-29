@@ -52,3 +52,26 @@ def test_get_closed_pnl_since_returns_partial_results_on_error():
     ]
     records = client.get_closed_pnl_since(1_700_000_000_000)
     assert records == [{"symbol": "AUSDT", "closedPnl": "1.0"}]
+
+
+def test_get_available_balance_usdt_parses_field():
+    client = _make_client()
+    client.session.get_wallet_balance.return_value = {
+        "result": {"list": [{"totalAvailableBalance": "123.45"}]},
+    }
+    assert client.get_available_balance_usdt() == 123.45
+
+
+def test_get_available_balance_usdt_returns_none_on_missing_field():
+    client = _make_client()
+    client.session.get_wallet_balance.return_value = {"result": {"list": [{}]}}
+    assert client.get_available_balance_usdt() is None
+
+
+def test_get_available_balance_usdt_returns_none_on_api_error():
+    client = _make_client()
+    from pybit.exceptions import InvalidRequestError
+
+    client.session.get_wallet_balance.side_effect = InvalidRequestError(
+        request="req", message="boom", status_code=400, time=0, resp_headers=None)
+    assert client.get_available_balance_usdt() is None
