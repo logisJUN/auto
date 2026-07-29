@@ -188,7 +188,7 @@ TEMPLATE = """
       <tr>
         <td>{{ p.symbol }}</td>
         <td class="{{ 'pos-long' if p.side == 'long' else 'pos-short' }}">{{ p.side.upper() }}</td>
-        <td>{{ p.leverage }}x</td>
+        <td>{{ p.leverage }}x ({{ '%.1f'|format(p.margin_pct) }}%)</td>
         <td>{{ p.qty }}</td>
         <td>{{ p.entry_price }}</td>
         <td>{{ p.last_price }}</td>
@@ -378,7 +378,10 @@ def index():
             unrealized = (last_price - trade["entry_price"]) * trade["qty"]
         else:
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
-        positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized})
+        leverage = trade.get("leverage") or 1
+        margin_pct = (trade["qty"] * trade["entry_price"] / leverage) / equity * 100.0 if equity > 0 else 0.0
+        positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized,
+                           "margin_pct": margin_pct})
 
     total_unrealized = sum(p["unrealized"] for p in positions)
 
