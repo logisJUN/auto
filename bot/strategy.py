@@ -511,6 +511,14 @@ class Strategy:
         if range_high <= 0 or range_low <= 0 or range_high <= range_low:
             return
 
+        # Range scalps use a tighter SL/TP multiplier than trend trades, so
+        # they're more fee-sensitive per trade -- require a stricter
+        # volatility floor than the general min_volatility_atr_pct (already
+        # checked in try_enter) before even considering one.
+        range_min_atr_pct = range_cfg.get("min_atr_pct", 0.0)
+        if range_min_atr_pct > 0 and (atr / close * 100.0) < range_min_atr_pct:
+            return
+
         # a neutral aggregate score doesn't guarantee price is actually ranging --
         # it can also happen mid-trend when sub-signals disagree. Skip if the
         # recent high-low band is too wide relative to ATR (that's expansion/

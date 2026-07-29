@@ -253,9 +253,16 @@ trade_management:
     # candles is no more than this many ATR; a wider band means the market is
     # trending/expanding, not consolidating, and range trades are skipped.
     max_range_width_atr_mult: 4.0
-    # tighter SL/TP than trend trades -- this is meant to be a quick scalp.
-    atr_sl_multiplier: 1.0
-    atr_tp_multiplier: 1.0
+    # Tighter SL/TP than trend trades -- this is meant to be a quick scalp.
+    # Raised from 1.0 -> 1.3: at 1.0, an ATR near the general volatility floor
+    # (0.15%) put the SL distance almost the same size as the ~0.11% round-trip
+    # fee, so fees ate a large share of every scalp's risk/reward.
+    atr_sl_multiplier: 1.3
+    atr_tp_multiplier: 1.3
+    # Range scalps are more fee-sensitive per trade than trend entries (tighter
+    # multiplier above), so require a stricter volatility floor than the
+    # general min_volatility_atr_pct before even considering a range entry.
+    min_atr_pct: 0.25
 
 loop:
   fast_poll_sec: 8          # price/emergency-exit checks while a position is open
