@@ -79,3 +79,22 @@ def test_fee_filter_treats_unknown_fee_rate_as_acceptable():
     client = FakeClient(tickers, fee_rates={})  # get_taker_fee_rate returns None
     result = universe.screen_top_symbols(client, top_n=1, max_taker_fee_rate=0.0006)
     assert result == ["UNKNOWNUSDT"]
+
+
+def test_excluded_symbols_are_dropped_and_backfilled():
+    tickers = [
+        {"symbol": "SOXLUSDT", "turnover24h": "1000"},  # highest turnover -- excluded
+        {"symbol": "AUSDT", "turnover24h": "900"},
+        {"symbol": "BUSDT", "turnover24h": "800"},
+    ]
+    client = FakeClient(tickers)
+    result = universe.screen_top_symbols(client, top_n=2, excluded_symbols={"SOXLUSDT"})
+    assert result == ["AUSDT", "BUSDT"]
+    assert "SOXLUSDT" not in result
+
+
+def test_excluded_symbols_empty_by_default():
+    tickers = [{"symbol": "SOXLUSDT", "turnover24h": "1000"}]
+    client = FakeClient(tickers)
+    result = universe.screen_top_symbols(client, top_n=1)
+    assert result == ["SOXLUSDT"]

@@ -16,6 +16,7 @@ def screen_top_symbols(
     top_n: int = 30,
     max_taker_fee_rate: float | None = None,
     candidate_pool_mult: int = 2,
+    excluded_symbols: set[str] | None = None,
 ) -> list[str]:
     """Ranks by 24h turnover, optionally filtering out symbols whose taker fee
     rate exceeds `max_taker_fee_rate` (some newly-listed/lower-liquidity
@@ -24,13 +25,23 @@ def screen_top_symbols(
     shrink the candidate list, so when it's on, turnover-rank a wider pool
     (top_n * candidate_pool_mult) first and backfill from it down to top_n,
     rather than silently returning fewer than top_n.
+
+    `excluded_symbols` drops specific symbols entirely (backfilled just like a
+    fee-filtered one) -- meant for tokenized-stock/commodity perpetuals that
+    ride Bybit's linear-USDT list alongside real crypto (e.g. SOXLUSDT is a
+    3x-leveraged semiconductor ETF token, not a coin) but trade on entirely
+    different drivers than the technical/news/funding signals here assume,
+    and can carry account/region restrictions a real crypto pair wouldn't.
     """
+    excluded_symbols = excluded_symbols or set()
     tickers = client.get_all_tickers()
 
     ranked = []
     for t in tickers:
         symbol = t.get("symbol", "")
         if not symbol.endswith(quote_suffix):
+            continue
+        if symbol in excluded_symbols:
             continue
         raw_turnover = t.get("turnover24h")
         if raw_turnover is None:

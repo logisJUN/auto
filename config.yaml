@@ -27,6 +27,15 @@ exchange:
     # much turnover it has (a structural drag on every round trip). Symbols
     # filtered out are backfilled from the next-highest-turnover candidates.
     max_taker_fee_rate: 0.0006
+    # Bybit's linear-USDT list also includes tokenized stocks/ETFs/commodities
+    # alongside real crypto (e.g. SOXLUSDT is a 3x-leveraged semiconductor ETF
+    # token, SKHYNIXUSDT a tokenized Hynix stock, XAUTUSDT gold) -- these ride
+    # entirely different drivers than the technical/news/funding signals here
+    # assume, and can carry account/region restrictions a real crypto pair
+    # wouldn't (observed live: SKHYNIXUSDT rejected with ErrCode 110132).
+    # Backfilled from the next-highest-turnover candidate just like a
+    # fee-filtered symbol. Add to this list as new offenders turn up.
+    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "XAUTUSDT"]
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
@@ -146,6 +155,11 @@ signals:
     keywords: ["bitcoin", "ethereum", "crypto", "fed ", "interest rate", "recession"]
     refresh_minutes: 15
     max_markets: 40
+    # These markets are broad crypto/macro questions, not per-altcoin -- only
+    # give this signal real confidence for the symbols it's actually about.
+    # Everything else (universe-scanned alts) gets zero confidence from it
+    # instead of an irrelevant macro sentiment pushing its direction.
+    relevant_symbols: ["BTCUSDT", "ETHUSDT"]
   funding:
     # perpetual funding rate (%, per interval) treated as "extreme" -- the
     # contrarian score/confidence saturate at +-this. Bybit funding on

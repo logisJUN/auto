@@ -146,16 +146,20 @@ class NewsSignal:
         self._refresh_if_needed()
         keywords = _symbol_keywords(symbol)
         relevant = [a for a in self._articles if any(k in a["text"].lower() for k in keywords)]
-        # if nothing symbol-specific, fall back to general market mood (macro affects all of crypto)
-        pool = relevant if relevant else self._articles
-
-        if not pool:
+        # No fallback to the general article pool when nothing symbol-specific
+        # matched: for a universe-scanned altcoin, "general market mood" is
+        # really just whatever's trending (usually BTC/ETH headlines) and has
+        # no real bearing on that specific coin -- reporting it as if it were
+        # relevant let unrelated macro news push a low-cap alt's direction.
+        # Zero confidence here means zero influence on the aggregate (see
+        # aggregator.aggregate), the same as any other signal with no data.
+        if not relevant:
             return {"score": 0.0, "confidence": 0.0, "article_count": 0, "sample": []}
 
-        raw_scores = [_score_text(a["text"]) for a in pool]
+        raw_scores = [_score_text(a["text"]) for a in relevant]
         avg = sum(raw_scores) / len(raw_scores)
         score = max(-1.0, min(1.0, avg / 2.5))
-        confidence = max(0.0, min(1.0, len(pool) / 15))
+        confidence = max(0.0, min(1.0, len(relevant) / 15))
 
-        sample = [a["title"] for a in pool[:5]]
-        return {"score": score, "confidence": confidence, "article_count": len(pool), "sample": sample}
+        sample = [a["title"] for a in relevant[:5]]
+        return {"score": score, "confidence": confidence, "article_count": len(relevant), "sample": sample}

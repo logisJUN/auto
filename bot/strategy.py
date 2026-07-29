@@ -90,7 +90,7 @@ class Strategy:
         klines = self._fetch_klines_multi(symbol)
         tech = technical.multi_timeframe_score(klines, timeframes, tech_cfg)
         news = self.news_signal.score_for_symbol(symbol)
-        poly = self.polymarket_signal.score()
+        poly = self.polymarket_signal.score(symbol)
         funding_rate = self.client.get_funding_rate(symbol)
         fund = funding.score(funding_rate, self.signals_cfg.get("funding", {}))
         weights = self.signals_cfg.get("weights", {})
@@ -772,6 +772,7 @@ class Strategy:
             screened = universe.screen_top_symbols(
                 self.client, quote_suffix="USDT", top_n=top_n,
                 max_taker_fee_rate=self.universe_cfg.get("max_taker_fee_rate"),
+                excluded_symbols=set(self.universe_cfg.get("excluded_symbols", [])),
             )
         except Exception:
             logger.exception("universe screening failed -- keeping current watchlist")
