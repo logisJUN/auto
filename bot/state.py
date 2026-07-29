@@ -24,6 +24,7 @@ def default_state() -> dict:
         "daily": {"date": _today_utc(), "start_equity": None, "realized_pnl": 0.0},
         "history": [],      # list of closed-trade summaries (kept short)
         "stale_cooldowns": {},  # symbol -> {"side": ..., "until_ts": ...}
+        "entry_backoffs": {},   # symbol -> {"until_ts": ..., "reason": ...}
     }
 
 
@@ -113,6 +114,23 @@ class StateStore:
 
     def get_stale_cooldown(self, symbol: str) -> dict | None:
         return self._state.get("stale_cooldowns", {}).get(symbol)
+
+    # -- entry-failure backoff ---------------------------------------------------------
+    def set_entry_backoff(self, symbol: str, until_ts: float, reason: str = ""):
+        """Blocks new entry attempts on `symbol` until until_ts -- set after an
+        order placement failure (e.g. insufficient margin), a repeated SL/TP
+        attach failure, or a non-retryable exchange error (e.g. regional
+        restriction), so the bot doesn't keep hammering the same doomed entry
+        every tick (observed live: one symbol retried 12x on insufficient
+        margin before finally filling; another kept failing SL/TP attach and
+        eating a round-trip fee on every attempt; a third was permanently
+        blocked by a regional restriction and retried every tick regardless).
+        """
+        self._state["entry_backoffs"][symbol] = {"until_ts": until_ts, "reason": reason}
+        self.save()
+
+    def get_entry_backoff(self, symbol: str) -> dict | None:
+        return self._state.get("entry_backoffs", {}).get(symbol)
 
     # -- misc ---------------------------------------------------------
     def get_last_summary_date(self) -> str | None:

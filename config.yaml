@@ -64,9 +64,16 @@ risk:
   # interpolated within this range based on signal confidence (low confidence ->
   # min, high confidence -> max), then capped by the exchange's own max leverage
   # for that symbol/margin tier.
+  # Trimmed max from 15 -> 13: a day's data showed the 0.60-0.70 confidence
+  # bucket (3 trades) carrying most of the day's profit while the single
+  # 0.70-0.80 trade -- which would've used more leverage -- barely made
+  # anything despite winning. Small sample, not conclusive, but the pattern
+  # (higher confidence/leverage not translating into proportionally more
+  # profit) argues for capping the upside amplification rather than trusting
+  # it further.
   leverage_by_symbol:
-    BTCUSDT: {min: 10, max: 15}
-    ETHUSDT: {min: 10, max: 15}
+    BTCUSDT: {min: 10, max: 13}
+    ETHUSDT: {min: 10, max: 13}
   # leverage range for any symbol NOT listed in leverage_by_symbol above -- i.e.
   # everything picked up by the dynamic universe scan.
   default_leverage_range: {min: 5, max: 8}
@@ -190,6 +197,24 @@ trade_management:
   # trade and repeating the round-trip fee in a tight, choppy range. A genuine
   # reversal (signal now favors the other side) is not blocked. 0 disables this.
   stale_reentry_cooldown_min: 30
+
+  # Entry-failure backoff: after a failed entry attempt, block retrying the
+  # same symbol for a while instead of hammering it every tick (observed live:
+  # a symbol retried 12x on insufficient margin before finally filling; another
+  # kept failing SL/TP attach and eating a round-trip fee on every attempt via
+  # the force-close-for-safety path; a third was permanently blocked by a
+  # regional restriction and kept getting retried every rescan regardless).
+  # entry_fail_backoff_min: generic order placement failure (e.g. insufficient
+  # margin) -- short, since conditions like margin headroom can change soon.
+  entry_fail_backoff_min: 5
+  # sl_tp_fail_backoff_min: SL/TP failed to attach and the position was force-
+  # closed for safety -- longer, since that already cost a round-trip fee and
+  # suggests a symbol-specific issue, not just bad timing.
+  sl_tp_fail_backoff_min: 60
+  # permanent_error_backoff_min: a non-retryable exchange error (e.g. Bybit
+  # ErrCode 110132 regional restriction) -- effectively "stop trying this
+  # symbol for the rest of the session" rather than retrying every rescan.
+  permanent_error_backoff_min: 1440
 
   # Range/mean-reversion scalp entries, only tried when the trend signal
   # (technical+news+polymarket) is neutral. Enter long near the recent range

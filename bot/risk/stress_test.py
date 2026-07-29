@@ -12,17 +12,30 @@ from __future__ import annotations
 from bot.signals import technical
 
 
-def compute_worst_case(client, cfg, equity: float, symbols: list[str] | None = None) -> dict:
+def compute_worst_case(client, cfg, equity: float, symbols: list[str] | None = None,
+                        open_trades: dict[str, dict] | None = None) -> dict:
     """`symbols` defaults to exchange.symbols (the pinned list) if not given --
     pass the caller's own list (e.g. pinned + currently-open) when the tradable
     universe is dynamic, since testing all ~30 scanned symbols here would mean
     a kline fetch per symbol just for a dashboard card.
+
+    `open_trades` (symbol -> trade dict, e.g. state.snapshot()["trades"]): for a
+    symbol that's actually open, uses that trade's REAL committed margin/
+    leverage/risk-distance instead of assuming every symbol independently gets
+    the full target margin_pct at max leverage. Without this, summing the
+    hypothetical worst case across N currently-open symbols overstates real
+    risk once margin_buffer_pct has already capped how much of the account
+    each one actually got (observed live: a naive sum hit 76% of equity while
+    real combined margin in use was capped well under that by the buffer).
+    Symbols not in open_trades still use the hypothetical target-allocation
+    estimate, since that's the right question for "if this opens next".
     """
     risk_cfg = cfg.get("risk", default={})
     trade_cfg = cfg.get("trade_management", default={})
     tech_cfg = cfg.get("signals", "technical", default={})
     if symbols is None:
         symbols = cfg.get("exchange", "symbols", default=[])
+    open_trades = open_trades or {}
 
     exec_tf = tech_cfg.get("timeframes", ["15", "60", "240"])[0]
     atr_period = tech_cfg.get("atr_period", 14)
@@ -34,6 +47,20 @@ def compute_worst_case(client, cfg, equity: float, symbols: list[str] | None = N
     per_symbol = []
     total_loss_pct = 0.0
     for symbol in symbols:
+        trade = open_trades.get(symbol)
+        if trade and trade.get("qty") and trade.get("leverage") and trade["entry_price"] > 0:
+            real_margin_pct = (trade["qty"] * trade["entry_price"] / trade["leverage"]) / equity if equity > 0 else 0.0
+            sl_distance_pct = trade.get("risk_distance", 0.0) / trade["entry_price"] * 100.0
+            loss_pct_of_equity = real_margin_pct * trade["leverage"] * sl_distance_pct
+            total_loss_pct += loss_pct_of_equity
+            per_symbol.append({
+                "symbol": symbol,
+                "leverage": trade["leverage"],
+                "sl_distance_pct": sl_distance_pct,
+                "loss_pct_of_equity": loss_pct_of_equity,
+            })
+            continue
+
         lev_range = risk_cfg.get("leverage_by_symbol", {}).get(symbol, default_lev_range)
         leverage = lev_range.get("max", risk_cfg.get("max_leverage", 5))
 

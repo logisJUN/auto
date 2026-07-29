@@ -21,6 +21,12 @@ from bot.state import StateStore
 
 logger = logging.getLogger("bot.strategy")
 
+# Bybit error codes that mean "this will never work, not just right now" (e.g.
+# a symbol this account/region is permanently barred from trading) -- worth a
+# much longer backoff than a transient failure like insufficient margin, which
+# can resolve itself as soon as something else closes.
+_PERMANENT_ENTRY_ERROR_CODES = ("110132",)  # regional restriction
+
 
 def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -165,6 +171,12 @@ class Strategy:
     def try_enter(self, symbol: str):
         if self.state.get_trade(symbol) is not None:
             return
+
+        backoff = self.state.get_entry_backoff(symbol)
+        if backoff and time.time() < backoff.get("until_ts", 0):
+            logger.debug("skip entry %s: in backoff (%s)", symbol, backoff.get("reason", ""))
+            return
+
         equity = self.client.get_equity_usdt()
         self._sync_daily_state(equity)
         if self._daily_loss_breached(equity):
@@ -309,6 +321,11 @@ class Strategy:
             return True  # can't tell -- default to the normal (less patient) timeout
         return self._margin_for_new_position(equity) <= 0
 
+    def _entry_backoff_minutes(self, exc: Exception) -> float:
+        if any(code in str(exc) for code in _PERMANENT_ENTRY_ERROR_CODES):
+            return self.trade_cfg.get("permanent_error_backoff_min", 1440)
+        return self.trade_cfg.get("entry_fail_backoff_min", 5)
+
     def _open(self, symbol: str, side: str, entry_price: float, margin: float,
               leverage: float, atr: float, trade_cfg: dict, extra_trade_fields: dict,
               log_extra: dict, msg_tag: str):
@@ -348,6 +365,8 @@ class Strategy:
         except BybitAPIError as exc:
             logger.error("failed to open position for %s: %s", symbol, exc)
             log_decision(self.log_dir, {"event": "entry_failed", "symbol": symbol, "error": str(exc)})
+            backoff_min = self._entry_backoff_minutes(exc)
+            self.state.set_entry_backoff(symbol, time.time() + backoff_min * 60, reason=str(exc)[:200])
             return
 
         # place_order's stopLoss/takeProfit params can silently fail to attach
@@ -364,6 +383,8 @@ class Strategy:
                 logger.critical("COULD NOT CLOSE UNPROTECTED POSITION %s -- MANUAL ACTION REQUIRED: %s", symbol, exc)
             self.notifier.send(f"[긴급] {symbol} SL/TP 설정 실패 - 긴급 청산 시도했습니다. Bybit 앱에서 직접 확인하세요.")
             log_decision(self.log_dir, {"event": "sl_tp_attach_failed", "symbol": symbol})
+            backoff_min = self.trade_cfg.get("sl_tp_fail_backoff_min", 60)
+            self.state.set_entry_backoff(symbol, time.time() + backoff_min * 60, reason="sl_tp_attach_failed")
             return
 
         trade = stop_manager.new_trade(symbol, side, entry_price, qty, atr, trade_cfg)

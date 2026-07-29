@@ -69,3 +69,15 @@ def test_stale_cooldown_defaults_to_empty_on_old_state_file(tmp_path):
     path.write_text('{"trades": {}, "daily": {"date": "x", "start_equity": null, "realized_pnl": 0.0}, "history": []}')
     state = StateStore(str(path))
     assert state.get_stale_cooldown("XUSDT") is None
+
+
+def test_entry_backoff_roundtrip(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    assert state.get_entry_backoff("XUSDT") is None
+
+    state.set_entry_backoff("XUSDT", until_ts=12345.0, reason="insufficient margin")
+    backoff = state.get_entry_backoff("XUSDT")
+    assert backoff == {"until_ts": 12345.0, "reason": "insufficient margin"}
+
+    reloaded = StateStore(str(tmp_path / "state.json"))
+    assert reloaded.get_entry_backoff("XUSDT") == {"until_ts": 12345.0, "reason": "insufficient margin"}

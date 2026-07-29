@@ -1,3 +1,5 @@
+import pytest
+
 from bot.risk import stress_test
 
 
@@ -85,3 +87,35 @@ def test_worst_case_handles_fetch_error_gracefully():
     result = stress_test.compute_worst_case(BrokenClient(), FakeConfig(RAW_CFG), equity=1000.0)
     assert all("error" in p for p in result["per_symbol"])
     assert result["worst_case_total_loss_pct"] == 0.0
+
+
+def test_open_trade_uses_real_margin_not_hypothetical_target():
+    """A currently-open position must be sized off what it actually committed
+    (qty*entry/leverage), not the target margin_pct% every symbol would get if
+    opened in isolation -- margin_buffer_pct already shrinks real allocations
+    for later positions, and the stress test must reflect that, not overstate it.
+    """
+    client = FakeClient(_make_candles())
+    open_trades = {
+        "AAAUSDT": {"qty": 1.0, "entry_price": 100.0, "leverage": 10, "risk_distance": 3.0},
+    }
+    result = stress_test.compute_worst_case(client, FakeConfig(RAW_CFG), equity=1000.0,
+                                             symbols=["AAAUSDT"], open_trades=open_trades)
+
+    by_symbol = {p["symbol"]: p for p in result["per_symbol"]}
+    # real margin = 1.0*100/10 = 10 -> 1% of equity(1000); sl_distance = 3.0/100*100 = 3.0%
+    # loss_pct_of_equity = 0.01 * 10 * 3.0 = 0.3 (vs. the hypothetical 25%*10*3.0=7.5)
+    assert by_symbol["AAAUSDT"]["loss_pct_of_equity"] == pytest.approx(0.3)
+    assert result["worst_case_total_loss_pct"] == pytest.approx(0.3)
+
+
+def test_open_trade_and_hypothetical_symbol_combine_correctly():
+    client = FakeClient(_make_candles())
+    open_trades = {"AAAUSDT": {"qty": 1.0, "entry_price": 100.0, "leverage": 10, "risk_distance": 3.0}}
+    result = stress_test.compute_worst_case(client, FakeConfig(RAW_CFG), equity=1000.0,
+                                             symbols=["AAAUSDT", "BBBUSDT"], open_trades=open_trades)
+
+    by_symbol = {p["symbol"]: p for p in result["per_symbol"]}
+    assert by_symbol["AAAUSDT"]["loss_pct_of_equity"] == pytest.approx(0.3)  # real, from open_trades
+    assert by_symbol["BBBUSDT"]["loss_pct_of_equity"] == 3.75  # hypothetical, as before
+    assert result["worst_case_total_loss_pct"] == pytest.approx(0.3 + 3.75)
