@@ -14,7 +14,12 @@ exchange:
   # of the refreshed list keeps being managed (SL/TP/trailing/stale-timeout)
   # until it closes -- it's just not eligible for new entries anymore.
   universe:
-    enabled: false
+    # re-enabled: staying pinned to just BTC/ETH repeatedly exposed the bot to
+    # the same wrong-direction (short) signal through a sustained correlated
+    # uptrend with no other symbol to diversify into -- the one trade outside
+    # BTC/ETH that day (SOXLUSDT, an already-open position from before the
+    # pin) was the day's best performer.
+    enabled: true
     top_n: 30
     rescan_interval_hours: 1
     # some newly-listed/lower-liquidity perpetuals charge double the standard
@@ -71,7 +76,10 @@ risk:
   # bot stops opening new trades once this many are open at the same time.
   max_concurrent_positions: 4
   # minimum aggregated confidence (0-1) required to open a position at all.
-  min_confidence_to_enter: 0.55
+  # 0.55-0.70 trades accounted for most of a day's realized loss (7 trades,
+  # -2.88 USDT) while higher-confidence trades held up meaningfully better --
+  # raised to cut off that weak bucket.
+  min_confidence_to_enter: 0.65
   # skip entries entirely (trend or range) when the execution-timeframe ATR is
   # below this % of price -- a dead/chopping market where the likely move
   # doesn't clearly clear the ~0.11% round-trip taker fee. 0 disables this check.
@@ -160,8 +168,12 @@ trade_management:
   flash_move_window_sec: 45
   # if the fast signal flips hard against an open position (score crosses
   # this magnitude opposite to position side) with decent confidence, exit early.
-  reversal_exit_score: 0.4
-  reversal_exit_confidence: 0.6
+  # Lowered from 0.4/0.6: a day of shorts that resisted a sustained uptrend for
+  # hours all got closed via SL, with signal_reversal never firing once --
+  # reversal detection was consistently slower than the full SL distance,
+  # cutting nothing early. More sensitive thresholds catch it sooner.
+  reversal_exit_score: 0.3
+  reversal_exit_confidence: 0.5
   # "give up" exit: if a position has been open at least this long AND price is
   # still within stale_exit_max_move_pct of entry, close it (profit or loss) and
   # free the slot for a fresh signal on another symbol. 0 disables this check.
