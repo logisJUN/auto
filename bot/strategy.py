@@ -415,13 +415,29 @@ class Strategy:
 
     def _open(self, symbol: str, side: str, entry_price: float, margin: float,
               leverage: float, atr: float, trade_cfg: dict, extra_trade_fields: dict,
-              log_extra: dict, msg_tag: str):
+              log_extra: dict, msg_tag: str, equity: float):
         if margin <= 0:
             logger.info("skip entry %s: no margin headroom left (buffer reserved)", symbol)
             return
 
-        inst = self.client.get_instrument_info(symbol)
         prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, atr, trade_cfg)
+
+        # Caps the % of equity a single stop-out could cost, independent of how
+        # margin/leverage combine to get there -- a wide ATR-based SL distance
+        # on a volatile symbol can blow past any reasonable per-trade risk even
+        # when margin sizing itself looks normal (observed live: KORUUSDT's own
+        # stress-test figure hit ~24% of equity from a 6.4% SL distance at 7x
+        # leverage). Skips the entry entirely rather than resizing it down.
+        max_risk_pct = self.risk_cfg.get("max_position_risk_pct", 0.0)
+        if max_risk_pct > 0 and equity > 0 and entry_price > 0:
+            sl_distance_pct = abs(entry_price - prospective["initial_sl"]) / entry_price * 100.0
+            position_risk_pct = (margin / equity) * leverage * sl_distance_pct
+            if position_risk_pct > max_risk_pct:
+                logger.info("skip entry %s: SL-hit risk %.2f%% of equity exceeds cap %.2f%%",
+                            symbol, position_risk_pct, max_risk_pct)
+                return
+
+        inst = self.client.get_instrument_info(symbol)
 
         sizing = position_sizing.compute_qty_fixed_margin(
             margin=margin,
@@ -497,7 +513,7 @@ class Strategy:
         margin = self._margin_for_new_position(equity)
         self._open(symbol, side, entry_price, margin, leverage, signal["atr"], self.trade_cfg,
                    extra_trade_fields={}, log_extra={"signal": signal},
-                   msg_tag=f" conf={signal['confidence']:.2f}")
+                   msg_tag=f" conf={signal['confidence']:.2f}", equity=equity)
 
     def _enter_range(self, symbol: str, signal: dict, equity: float):
         range_cfg = self.trade_cfg.get("range_trade", {})
@@ -542,7 +558,7 @@ class Strategy:
         self._open(symbol, side, entry_price, margin, leverage, atr, range_cfg,
                    extra_trade_fields={"is_range_trade": True},
                    log_extra={"range_high": range_high, "range_low": range_low},
-                   msg_tag=":range")
+                   msg_tag=":range", equity=equity)
 
     # -- exits / management ---------------------------------------------------------
     def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):

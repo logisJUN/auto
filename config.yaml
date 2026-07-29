@@ -35,7 +35,7 @@ exchange:
     # wouldn't (observed live: SKHYNIXUSDT rejected with ErrCode 110132).
     # Backfilled from the next-highest-turnover candidate just like a
     # fee-filtered symbol. Add to this list as new offenders turn up.
-    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "XAUTUSDT"]
+    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "XAUTUSDT", "TSLAUSDT"]
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
@@ -105,6 +105,15 @@ risk:
   # bot stops opening new trades for the day once realized loss hits this % of
   # the equity it had at the start of the day (UTC).
   max_daily_loss_pct: 8.0
+  # Skip an entry entirely if a full SL hit on it alone would cost more than
+  # this % of current equity -- (margin/equity) * leverage * sl_distance_pct.
+  # Catches the case a margin/leverage cap alone doesn't: a wide ATR-based SL
+  # distance on a volatile symbol can blow past any reasonable per-trade risk
+  # even when the margin sizing itself looks normal (observed live: KORUUSDT's
+  # own stress-test figure hit ~24% of equity from a 6.4% SL distance at 7x
+  # leverage). A single trade shouldn't alone be able to exceed the whole
+  # day's loss budget. 0 disables this check.
+  max_position_risk_pct: 8.0
   # bot stops opening new trades once this many are open at the same time.
   max_concurrent_positions: 4
   # minimum aggregated confidence (0-1) required to open a position at all.
