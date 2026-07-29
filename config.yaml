@@ -57,6 +57,22 @@ risk:
     # ...and must beat the weakest held position's current confidence by at
     # least this much (not just be marginally better).
     min_confidence_margin_over_weakest: 0.15
+    # Biases which open position gets displaced toward one on an
+    # over-represented side (e.g. a 3rd short among 3 shorts), rather than
+    # picking purely by confidence with no regard for directional diversity --
+    # otherwise a "diversifying" swap could leave the portfolio just as skewed.
+    # Scales with (count on that side - 1); 0 disables the bias entirely.
+    override_diversity_bonus: 0.1
+  # Hard cap: never hold more than this many positions on the same side at
+  # once, regardless of signal strength -- observed live as BTC/ETH both stuck
+  # short through a sustained uptrend, each new signal confidently (but
+  # wrongly) re-confirming the same directional bet. 0 disables this check.
+  max_concurrent_positions_per_direction: 2
+  # Each position already open on a side raises the confidence bar for another
+  # one on that same side by this much -- a bigger pile-up needs a
+  # correspondingly more convincing signal, not just "still says short". 0
+  # disables (flat min_confidence_to_enter regardless of current skew).
+  same_direction_confidence_step: 0.05
   # hard cap on leverage the bot will ever request, regardless of signal confidence.
   # only used as a fallback if default_leverage_range below is missing entirely.
   max_leverage: 5

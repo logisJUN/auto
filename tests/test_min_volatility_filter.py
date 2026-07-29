@@ -4,6 +4,7 @@ market where the likely move doesn't clearly clear the round-trip taker fee,
 the exact failure mode diagnosed from a real SUIUSDT loss that matched its
 fee exactly.
 """
+import copy
 from unittest.mock import MagicMock
 
 from bot.config import Config, Secrets
@@ -53,7 +54,10 @@ def _make_strategy(tmp_path):
     secrets = Secrets(bybit_api_key="x", bybit_api_secret="y", bybit_testnet=True,
                        newsapi_key=None, telegram_bot_token=None, telegram_chat_id=None,
                        dashboard_token="t")
-    cfg = Config(secrets=secrets, raw=RAW_CFG)
+    # deep-copy: a later test mutates strategy.risk_cfg[...] in place, the same
+    # nested dict as RAW_CFG["risk"] unless copied -- would otherwise leak into
+    # any test added after it that reuses this shared module-level RAW_CFG.
+    cfg = Config(secrets=secrets, raw=copy.deepcopy(RAW_CFG))
     state = StateStore(str(tmp_path / "state.json"))
     notifier = Notifier(None, None)
     client = MagicMock(spec=BybitClient)

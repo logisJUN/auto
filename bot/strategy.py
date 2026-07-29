@@ -201,8 +201,26 @@ class Strategy:
                          symbol, atr_pct, min_atr_pct)
             return
 
+        direction = signal["direction"]
+        same_side_count = self._same_side_count(direction) if direction != "neutral" else 0
+
         min_conf = self.risk_cfg.get("min_confidence_to_enter", 0.55)
-        is_trend_candidate = signal["direction"] != "neutral" and signal["confidence"] >= min_conf
+        # The more positions already piled up on one side, the more directional
+        # exposure a fresh same-side entry adds on top of -- require higher
+        # confidence for each one beyond the first, so a bigger pile-up needs a
+        # correspondingly more convincing signal, not just "still says short".
+        skew_step = self.risk_cfg.get("same_direction_confidence_step", 0.0)
+        effective_min_conf = min_conf + same_side_count * skew_step
+        is_trend_candidate = direction != "neutral" and signal["confidence"] >= effective_min_conf
+
+        # Hard cap: no matter how strong the signal, don't add yet another
+        # position on a side that's already at the limit -- observed live as
+        # BTC/ETH both stuck short through a sustained uptrend, each new signal
+        # confidently (but wrongly) re-confirming the same directional bet.
+        max_per_side = self.risk_cfg.get("max_concurrent_positions_per_direction", 0)
+        if is_trend_candidate and max_per_side > 0 and same_side_count >= max_per_side:
+            logger.debug("skip entry %s: already at max %d %s positions", symbol, max_per_side, direction)
+            return
 
         # Don't immediately re-open the same losing, going-nowhere trade right after
         # a stale_timeout close -- observed live as a symbol stuck in a tight range
@@ -229,6 +247,9 @@ class Strategy:
             self._enter_trend(symbol, signal, equity)
         elif signal["direction"] == "neutral":
             self._enter_range(symbol, signal, equity)
+
+    def _same_side_count(self, side: str) -> int:
+        return sum(1 for t in self.state.snapshot().get("trades", {}).values() if t.get("side") == side)
 
     def _current_confidence_of_open(self, symbol: str, trade: dict) -> float:
         """Confidence of the position's own direction, from its *current* cached
@@ -257,11 +278,24 @@ class Strategy:
             return None
 
         trades = self.state.snapshot().get("trades", {})
-        weakest_symbol, weakest_trade, weakest_conf = None, None, None
+        side_counts: dict[str, int] = {}
+        for t in trades.values():
+            side_counts[t["side"]] = side_counts.get(t["side"], 0) + 1
+
+        # Bias displacement toward a position on an over-represented side --
+        # override was previously picking purely by confidence with no regard
+        # for directional diversity, so it could keep a portfolio just as
+        # skewed (or worse) after "diversifying" via a swap. The bonus makes a
+        # position on a 3-deep side more likely to be picked than an equally
+        # weak one on a side with no other positions, without letting it
+        # override a large confidence gap on its own.
+        diversity_bonus = override_cfg.get("override_diversity_bonus", 0.0)
+        weakest_symbol, weakest_trade, weakest_conf, weakest_score = None, None, None, None
         for open_symbol, trade in trades.items():
             conf = self._current_confidence_of_open(open_symbol, trade)
-            if weakest_conf is None or conf < weakest_conf:
-                weakest_symbol, weakest_trade, weakest_conf = open_symbol, trade, conf
+            score = conf - diversity_bonus * (side_counts.get(trade["side"], 1) - 1)
+            if weakest_score is None or score < weakest_score:
+                weakest_symbol, weakest_trade, weakest_conf, weakest_score = open_symbol, trade, conf, score
         if weakest_symbol is None:
             return None
 

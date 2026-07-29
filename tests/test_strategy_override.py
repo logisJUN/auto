@@ -2,11 +2,13 @@
 a strong enough new trend signal should close the weakest currently-held
 position and take that trade instead of sitting out.
 """
+import copy
 from unittest.mock import MagicMock
 
 from bot.config import Config, Secrets
 from bot.exchange.bybit_client import BybitClient
 from bot.notify import Notifier
+from bot.risk import stop_manager
 from bot.state import StateStore
 from bot.strategy import Strategy
 
@@ -66,7 +68,11 @@ def _make_strategy(state_path, log_path):
     secrets = Secrets(bybit_api_key="x", bybit_api_secret="y", bybit_testnet=True,
                        newsapi_key=None, telegram_bot_token=None, telegram_chat_id=None,
                        dashboard_token="t")
-    cfg = Config(secrets=secrets, raw=RAW_CFG)
+    # deep-copy: several tests mutate strategy.risk_cfg[...] in place, which is
+    # the SAME nested dict as RAW_CFG["risk"] unless copied -- without this,
+    # one test's mutation (e.g. disabling override_entry) leaks into every
+    # later test in this file that reuses the shared module-level RAW_CFG.
+    cfg = Config(secrets=secrets, raw=copy.deepcopy(RAW_CFG))
     state = StateStore(state_path)
     notifier = Notifier(None, None)
     client = MagicMock(spec=BybitClient)
@@ -150,6 +156,41 @@ def test_override_disabled_never_displaces(tmp_path):
 
     assert state.get_trade("NEWUSDT") is None
     assert state.open_trade_count() == 2
+
+
+def test_diversity_bonus_prefers_displacing_the_overrepresented_side(tmp_path):
+    """Without the bonus, DUSDT (0.20, the single lowest raw confidence) would
+    be displaced. With a diversity bonus biasing toward the 3-deep short side,
+    AUSDT gets picked instead -- reducing the skew rather than leaving it just
+    as concentrated (or displacing the portfolio's only diversifying position).
+    """
+    strategy, state = _make_strategy(str(tmp_path / "state.json"), str(tmp_path / "logs"))
+    strategy.risk_cfg["override_entry"]["override_diversity_bonus"] = 0.15
+    strategy.risk_cfg["max_concurrent_positions"] = 4
+
+    def _mk(symbol, side):
+        return stop_manager.new_trade(symbol, side, entry_price=100.0, qty=1.0, atr=1.0, cfg=strategy.trade_cfg)
+
+    state.set_trade("AUSDT", _mk("AUSDT", "short"))
+    state.set_trade("BUSDT", _mk("BUSDT", "short"))
+    state.set_trade("CUSDT", _mk("CUSDT", "short"))
+    state.set_trade("DUSDT", _mk("DUSDT", "long"))
+
+    signals = {
+        "AUSDT": _signal(0.25, "short"),
+        "BUSDT": _signal(0.30, "short"),
+        "CUSDT": _signal(0.35, "short"),
+        "DUSDT": _signal(0.20, "long"),  # lowest raw confidence
+    }
+    strategy.get_signal = lambda s, force=False: signals[s]
+    strategy.symbols = list(signals.keys()) + ["NEWUSDT"]
+    signals["NEWUSDT"] = _signal(0.95, "short")
+
+    strategy.try_enter("NEWUSDT")
+
+    assert state.get_trade("AUSDT") is None       # displaced despite a higher raw confidence than DUSDT
+    assert state.get_trade("DUSDT") is not None    # the portfolio's only diversifying position survives
+    assert state.get_trade("NEWUSDT") is not None
 
 
 def test_unlisted_symbol_uses_default_leverage_range(tmp_path):
