@@ -11,6 +11,7 @@ import os
 import time
 from pathlib import Path
 
+import requests
 from flask import Flask, abort, render_template_string, request
 
 from bot.config import load_config
@@ -33,6 +34,27 @@ client = BybitClient(
 # Bybit's API on every refresh.
 _STRESS_CACHE_TTL_SEC = 300
 _stress_cache = {"ts": 0.0, "data": None}
+
+# USD/KRW moves slowly enough that an hourly refresh is plenty -- avoids a
+# forex API call on every 20s dashboard refresh. Free, no-key endpoint; if it
+# ever fails, the dashboard just omits the KRW figure rather than erroring.
+_FX_CACHE_TTL_SEC = 3600
+_fx_cache = {"ts": 0.0, "usd_krw": None}
+
+
+def _get_usd_krw_rate() -> float | None:
+    now = time.time()
+    if now - _fx_cache["ts"] < _FX_CACHE_TTL_SEC and _fx_cache["usd_krw"] is not None:
+        return _fx_cache["usd_krw"]
+    try:
+        resp = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
+        resp.raise_for_status()
+        rate = float(resp.json()["rates"]["KRW"])
+    except Exception:
+        return _fx_cache["usd_krw"]  # keep serving the last good rate if we have one
+    _fx_cache["usd_krw"] = rate
+    _fx_cache["ts"] = now
+    return rate
 
 
 def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict) -> list[dict]:
@@ -151,7 +173,9 @@ TEMPLATE = """
 
   <div class="card">
     <div class="grid">
-      <div><div class="stat-label">계좌 자산 (USDT)</div><div class="stat-value">{{ equity }}</div></div>
+      <div><div class="stat-label">계좌 자산 (USDT)</div><div class="stat-value">{{ equity }}</div>
+        {% if equity_krw is not none %}<div class="small">≈ {{ '{:,.0f}'.format(equity_krw) }}원</div>{% endif %}
+      </div>
       <div><div class="stat-label">총 미실현손익</div><div class="stat-value {{ 'pnl-pos' if total_unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(total_unrealized) }}</div></div>
       <div><div class="stat-label">오늘 실현 손익</div><div class="stat-value {{ 'pnl-pos' if daily_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(daily_pnl) }}</div></div>
       <div><div class="stat-label">오늘 손익률 / 한도</div><div class="stat-value {{ 'pnl-pos' if daily_change_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(daily_change_pct) }}% / {{ max_daily_loss_pct }}%</div></div>
@@ -359,6 +383,9 @@ def index():
     except BybitAPIError:
         equity = snapshot.get("daily", {}).get("start_equity") or 0.0
 
+    usd_krw = _get_usd_krw_rate()
+    equity_krw = equity * usd_krw if usd_krw is not None else None
+
     daily = snapshot.get("daily", {})
     daily_pnl = daily.get("realized_pnl", 0.0)
     daily_loss_pct = state.daily_loss_pct(equity)
@@ -413,6 +440,7 @@ def index():
         TEMPLATE,
         testnet=cfg.secrets.bybit_testnet,
         equity=round(equity, 4),
+        equity_krw=equity_krw,
         total_unrealized=total_unrealized,
         daily_pnl=daily_pnl,
         daily_loss_pct=daily_loss_pct,
