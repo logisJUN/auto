@@ -170,6 +170,31 @@ class Strategy:
         for label, stats in sorted(perf["by_confidence"].items()):
             lines.append(f"신뢰도 {label}: {stats['count']}건, 승률 {stats['win_rate'] * 100:.0f}%, 손익 {stats['total_pnl']:.4f} USDT")
 
+        if perf["by_symbol"]:
+            lines.append("")
+            lines.append("[종목별 성과 (누적, 로그가 살아있는 기간 기준)]")
+            for symbol, stats in perf["by_symbol"].items():
+                win_rate_str = f"{stats['win_rate'] * 100:.0f}%" if stats["win_rate"] is not None else "-"
+                lines.append(f"{symbol}: {stats['count']}건, 승률 {win_rate_str}, 손익 {stats['total_pnl']:.4f} USDT")
+
+        # Full per-trade list closed today, as a durable external record -- the
+        # local decisions.jsonl/state.json this is drawn from get wiped on
+        # every Render free-plan disk reset, so without this the sample this
+        # bot has actually accumulated is only ever whatever survived since
+        # the last restart. The email itself becomes the multi-day history.
+        today_trades = [
+            t for t in perf["trades"]
+            if t.get("exit_ts") and datetime.fromtimestamp(t["exit_ts"], tz=timezone.utc).strftime("%Y-%m-%d") == today
+        ]
+        if today_trades:
+            lines.append("")
+            lines.append(f"[오늘 청산된 거래 {len(today_trades)}건]")
+            for t in sorted(today_trades, key=lambda x: x["exit_ts"]):
+                conf_str = f"conf={t['confidence']:.2f}" if t["confidence"] is not None else "range"
+                fee_str = f", 수수료={t['fees_paid']:.4f}" if t.get("fees_paid") is not None else ""
+                lines.append(f"{t['symbol']} {(t['side'] or '').upper()} {conf_str} "
+                             f"pnl={t['pnl']:.4f}{fee_str} 사유={t['reason']}")
+
         self.email.send(f"[Bybit Bot] {today} 일일 요약", "\n".join(lines))
         self.state.set_last_summary_date(today)
 
@@ -549,6 +574,18 @@ class Strategy:
             if cooldown_min > 0:
                 self.state.set_stale_cooldown(symbol, trade["side"], time.time() + cooldown_min * 60)
 
+        # Splits the final leg's pnl into gross price movement vs. implied fees,
+        # so a loss can be told apart as "the market moved against us" vs. "we
+        # were basically flat and just paid the round-trip fee" -- previously
+        # only the combined net figure was ever recorded, so this always had
+        # to be guessed at. Only meaningful when we have the exchange's own net
+        # closedPnl to compare against; the price-based estimate fallback IS
+        # the gross figure already (no fee data available), so fees are
+        # unknown (not zero) in that case.
+        gross_price_pnl = (exit_price - trade["entry_price"]) * trade["qty"] if trade["side"] == "long" \
+            else (trade["entry_price"] - exit_price) * trade["qty"]
+        fees_paid = (gross_price_pnl - pnl) if not pnl_is_estimate else None
+
         self.state.add_realized_pnl(pnl)
         self.state.set_trade(symbol, None)
         # trade["pnl"] reported below is the WHOLE trade's realized pnl, including
@@ -560,14 +597,18 @@ class Strategy:
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "exit_price": exit_price, "qty": trade["qty"], "pnl": total_pnl, "reason": reason,
             "pnl_is_estimate": pnl_is_estimate, "closed_at": time.time(),
+            "gross_price_pnl": gross_price_pnl, "fees_paid": fees_paid,
         })
 
         est_tag = " (est.)" if pnl_is_estimate else ""
-        msg = f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} PnL={total_pnl:+.4f} USDT{est_tag}"
+        fee_tag = f" (수수료 {fees_paid:+.4f})" if fees_paid is not None else ""
+        msg = (f"[종료:{reason}] {symbol} {trade['side'].upper()} exit~{exit_price:.4f} "
+               f"PnL={total_pnl:+.4f} USDT{est_tag}{fee_tag}")
         logger.info(msg)
         self.notifier.send(msg)
         log_decision(self.log_dir, {"event": "exit", "symbol": symbol, "reason": reason,
-                                     "exit_price": exit_price, "pnl": total_pnl, "pnl_is_estimate": pnl_is_estimate})
+                                     "exit_price": exit_price, "pnl": total_pnl, "pnl_is_estimate": pnl_is_estimate,
+                                     "gross_price_pnl": gross_price_pnl, "fees_paid": fees_paid})
 
     def _take_partial_profit(self, symbol: str, trade: dict, fraction: float):
         """Closes `fraction` of the position at market to lock in realized profit,

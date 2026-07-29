@@ -43,6 +43,18 @@ def test_range_trades_excluded_from_confidence_buckets(tmp_path):
     assert summary["by_confidence"] == {}
 
 
+def test_exit_fees_paid_passed_through_to_reconstructed_trade(tmp_path):
+    events = [
+        {"event": "entry", "symbol": "AAAUSDT", "side": "long", "signal": {"confidence": 0.65}, "ts": 1},
+        {"event": "exit", "symbol": "AAAUSDT", "reason": "sl_tp_hit", "pnl": 1.89, "fees_paid": 0.11, "ts": 2},
+    ]
+    _write_decisions(tmp_path, events)
+
+    summary = compute_performance_summary(tmp_path)
+
+    assert summary["trades"][0]["fees_paid"] == 0.11
+
+
 def test_unmatched_entry_without_exit_is_ignored(tmp_path):
     events = [
         {"event": "entry", "symbol": "CCCUSDT", "side": "long",
@@ -63,3 +75,25 @@ def test_no_log_file_returns_empty_summary(tmp_path):
     # unconditionally (e.g. the daily summary email).
     assert summary["by_type"]["trend"]["count"] == 0
     assert summary["by_type"]["range"]["count"] == 0
+    assert summary["by_symbol"] == {}
+
+
+def test_by_symbol_breaks_down_stats_and_sorts_worst_first(tmp_path):
+    events = [
+        {"event": "entry", "symbol": "AAAUSDT", "side": "long", "signal": {"confidence": 0.65}, "ts": 1},
+        {"event": "exit", "symbol": "AAAUSDT", "reason": "sl_tp_hit", "pnl": 5.0, "ts": 2},
+        {"event": "entry", "symbol": "BBBUSDT", "side": "short", "signal": {"confidence": 0.9}, "ts": 3},
+        {"event": "exit", "symbol": "BBBUSDT", "reason": "sl_tp_hit", "pnl": -8.0, "ts": 4},
+        {"event": "entry", "symbol": "BBBUSDT", "side": "short", "signal": {"confidence": 0.9}, "ts": 5},
+        {"event": "exit", "symbol": "BBBUSDT", "reason": "stale_timeout", "pnl": -1.0, "ts": 6},
+    ]
+    _write_decisions(tmp_path, events)
+
+    summary = compute_performance_summary(tmp_path)
+
+    assert summary["by_symbol"]["AAAUSDT"]["count"] == 1
+    assert summary["by_symbol"]["AAAUSDT"]["total_pnl"] == 5.0
+    assert summary["by_symbol"]["BBBUSDT"]["count"] == 2
+    assert summary["by_symbol"]["BBBUSDT"]["total_pnl"] == -9.0
+    # worst total_pnl first
+    assert list(summary["by_symbol"].keys()) == ["BBBUSDT", "AAAUSDT"]

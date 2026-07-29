@@ -127,17 +127,28 @@ def _build_equity_curve(history: list[dict]) -> dict | None:
 
 
 def _get_stress_test(equity: float, open_trades: dict) -> dict | None:
+    # With the dynamic universe scan on, exchange.symbols is just the pinned
+    # list -- test that plus whatever's actually open, not all ~30 scanned
+    # symbols (that would mean a kline fetch per symbol on every cache miss).
+    pinned = cfg.get("exchange", "symbols", default=[])
+    symbols = list(dict.fromkeys(list(pinned) + list(open_trades.keys())))
+    symbols_key = tuple(sorted(symbols))
+
     now = time.time()
-    if _stress_cache["data"] is None or now - _stress_cache["ts"] > _STRESS_CACHE_TTL_SEC:
-        # With the dynamic universe scan on, exchange.symbols is just the pinned
-        # list -- test that plus whatever's actually open, not all ~30 scanned
-        # symbols (that would mean a kline fetch per symbol on every cache miss).
-        pinned = cfg.get("exchange", "symbols", default=[])
-        symbols = list(dict.fromkeys(list(pinned) + list(open_trades.keys())))
+    # Refresh immediately if the set of open/pinned symbols changed (a newly
+    # opened position on a universe-scanned symbol must show up right away,
+    # not sit invisible to the risk report for up to 5 minutes), otherwise
+    # only on the normal TTL -- avoids a kline fetch per symbol on every 20s
+    # dashboard refresh for an unchanged set of positions.
+    stale = (_stress_cache["data"] is None
+             or now - _stress_cache["ts"] > _STRESS_CACHE_TTL_SEC
+             or _stress_cache.get("symbols_key") != symbols_key)
+    if stale:
         try:
             _stress_cache["data"] = stress_test.compute_worst_case(
                 client, cfg, equity, symbols=symbols, open_trades=open_trades)
             _stress_cache["ts"] = now
+            _stress_cache["symbols_key"] = symbols_key
         except Exception:
             return _stress_cache["data"]
     return _stress_cache["data"]
@@ -249,7 +260,7 @@ TEMPLATE = """
     <h2 style="font-size:1rem;">거래 이력</h2>
     {% if trade_history %}
     <table>
-      <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>손익</th><th>사유</th></tr>
+      <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>손익</th><th>수수료</th><th>사유</th></tr>
       {% for t in trade_history %}
       <tr>
         <td class="small">{{ t.time_str }}</td>
@@ -259,6 +270,7 @@ TEMPLATE = """
         <td>{{ t.exit_price }}</td>
         <td>{{ t.qty }}</td>
         <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
+        <td class="small">{{ '-%.4f'|format(t.fees_paid) if t.fees_paid is defined and t.fees_paid is not none else '-' }}</td>
         <td class="small">{{ t.reason }}</td>
       </tr>
       {% endfor %}
@@ -324,6 +336,19 @@ TEMPLATE = """
       </tr>
       {% endfor %}
     </table>
+    {% if perf.by_symbol %}
+    <h2 style="font-size:1rem; margin-top:12px;">종목별 성과</h2>
+    <table>
+      <tr><th>심볼</th><th>거래수</th><th>승률</th><th>누적손익</th></tr>
+      {% for symbol, s in perf.by_symbol.items() %}
+      <tr>
+        <td>{{ symbol }}</td><td>{{ s.count }}</td>
+        <td>{{ '%.0f'|format(s.win_rate * 100) if s.win_rate is not none else '-' }}{{ '%' if s.win_rate is not none }}</td>
+        <td class="{{ 'pnl-pos' if s.total_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(s.total_pnl) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
     <div class="small">decisions.jsonl의 진입/청산 기록을 짝지어 계산합니다 (재배포로 로그가 초기화되면 리셋됩니다).</div>
   </div>
   {% endif %}
@@ -354,12 +379,42 @@ def _check_token():
         abort(403)
 
 
+_COMPONENT_ABBR = {"technical": "T", "volume": "V", "news": "N", "polymarket": "P", "funding": "F"}
+
+
+def _component_breakdown(signal: dict) -> str:
+    """Compact per-signal-source score breakdown (e.g. 'T:+0.30 V:+0.10
+    N:-0.05 P:+0.20 F:-0.10') -- lets you tell which sub-signal is driving (or
+    fighting) the final direction, instead of only ever seeing the one
+    blended confidence number.
+    """
+    components = signal.get("components") or {}
+    parts = []
+    for key, abbr in _COMPONENT_ABBR.items():
+        c = components.get(key)
+        if c:
+            parts.append(f"{abbr}:{c.get('score', 0.0):+.2f}")
+    return " ".join(parts)
+
+
 def _decision_summary(d: dict) -> str:
     event = d.get("event")
     if event == "entry":
-        return f"{d.get('symbol')} {d.get('side','').upper()} entry={d.get('entry_price')} SL={d.get('sl')} TP={d.get('tp')}"
+        base = f"{d.get('symbol')} {d.get('side','').upper()} entry={d.get('entry_price')} SL={d.get('sl')} TP={d.get('tp')}"
+        signal = d.get("signal")
+        if signal:
+            breakdown = _component_breakdown(signal)
+            if breakdown:
+                base += f" [{breakdown}]"
+        return base
     if event == "exit":
-        return f"{d.get('symbol')} reason={d.get('reason')} pnl={d.get('pnl'):.4f}" if d.get('pnl') is not None else str(d)
+        if d.get('pnl') is None:
+            return str(d)
+        base = f"{d.get('symbol')} reason={d.get('reason')} pnl={d.get('pnl'):.4f}"
+        fees = d.get("fees_paid")
+        if fees is not None:
+            base += f" (수수료 {fees:+.4f})"
+        return base
     if event == "adjust":
         return f"{d.get('symbol')} SL={d.get('sl')} TP={d.get('tp')} ({d.get('reason')})"
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})

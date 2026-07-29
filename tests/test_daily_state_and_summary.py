@@ -9,6 +9,8 @@ Strategy._maybe_send_daily_summary(): sends a once-per-day email summary
 (performance data that would otherwise be lost to a Render free-plan disk
 reset), tracked via state.last_summary_date so it doesn't resend the same day.
 """
+import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from bot.config import Config, Secrets
@@ -142,6 +144,40 @@ def test_daily_summary_sent_once_and_marks_date(tmp_path):
     # calling again the same day must not resend
     strategy._maybe_send_daily_summary()
     assert strategy.email.send.call_count == 1
+
+
+def test_daily_summary_includes_per_trade_list_and_by_symbol_breakdown(tmp_path):
+    """The email is the only durable record once state.json/decisions.jsonl
+    get wiped by a Render free-plan disk reset -- it must carry enough detail
+    (individual trades, by-symbol breakdown) to rebuild a multi-day sample
+    from the inbox alone.
+    """
+    import json
+    from bot.strategy import _today_utc
+
+    email_cfg = dict(email_smtp_host="smtp.example.com", email_smtp_port=465,
+                      email_smtp_user="u@example.com", email_smtp_password="pw",
+                      email_from=None, email_to="to@example.com")
+    strategy, state, client = _make_strategy(tmp_path, email_cfg)
+    strategy.email.send = MagicMock()
+
+    now = time.time()
+    events = [
+        {"event": "entry", "symbol": "AAAUSDT", "side": "long", "signal": {"confidence": 0.72}, "ts": now - 100},
+        {"event": "exit", "symbol": "AAAUSDT", "reason": "sl_tp_hit", "pnl": -0.21, "fees_paid": 0.11, "ts": now},
+    ]
+    log_path = Path(strategy.log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    with open(log_path / "decisions.jsonl", "w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+
+    strategy._maybe_send_daily_summary()
+
+    body = strategy.email.send.call_args.args[1]
+    assert "AAAUSDT" in body
+    assert "수수료=0.1100" in body
+    assert "종목별 성과" in body
 
 
 def test_daily_summary_resends_on_a_new_day(tmp_path):
