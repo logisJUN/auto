@@ -154,7 +154,7 @@ TEMPLATE = """
       <div><div class="stat-label">계좌 자산 (USDT)</div><div class="stat-value">{{ equity }}</div></div>
       <div><div class="stat-label">총 미실현손익</div><div class="stat-value {{ 'pnl-pos' if total_unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(total_unrealized) }}</div></div>
       <div><div class="stat-label">오늘 실현 손익</div><div class="stat-value {{ 'pnl-pos' if daily_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(daily_pnl) }}</div></div>
-      <div><div class="stat-label">오늘 손실률 / 한도</div><div class="stat-value">{{ '%.2f'|format(daily_loss_pct) }}% / {{ max_daily_loss_pct }}%</div></div>
+      <div><div class="stat-label">오늘 손익률 / 한도</div><div class="stat-value {{ 'pnl-pos' if daily_change_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(daily_change_pct) }}% / {{ max_daily_loss_pct }}%</div></div>
       <div><div class="stat-label">보유 포지션</div><div class="stat-value">{{ open_count }} / {{ max_positions }}</div></div>
     </div>
   </div>
@@ -183,11 +183,12 @@ TEMPLATE = """
     <h2 style="font-size:1rem;">열린 포지션</h2>
     {% if positions %}
     <table>
-      <tr><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현손익</th></tr>
+      <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현손익</th></tr>
       {% for p in positions %}
       <tr>
         <td>{{ p.symbol }}</td>
         <td class="{{ 'pos-long' if p.side == 'long' else 'pos-short' }}">{{ p.side.upper() }}</td>
+        <td>{{ p.leverage }}x</td>
         <td>{{ p.qty }}</td>
         <td>{{ p.entry_price }}</td>
         <td>{{ p.last_price }}</td>
@@ -361,6 +362,11 @@ def index():
     daily = snapshot.get("daily", {})
     daily_pnl = daily.get("realized_pnl", 0.0)
     daily_loss_pct = state.daily_loss_pct(equity)
+    # daily_loss_pct is clamped to >=0 (it's compared against the loss-limit
+    # circuit breaker) -- the dashboard wants the real signed change (a gain
+    # shows as a real "+", not clamped to 0), so compute that separately here.
+    start_equity = daily.get("start_equity") or 0.0
+    daily_change_pct = ((equity - start_equity) / start_equity * 100.0) if start_equity > 0 else 0.0
 
     positions = []
     for symbol, trade in snapshot.get("trades", {}).items():
@@ -407,6 +413,7 @@ def index():
         total_unrealized=total_unrealized,
         daily_pnl=daily_pnl,
         daily_loss_pct=daily_loss_pct,
+        daily_change_pct=daily_change_pct,
         max_daily_loss_pct=cfg.get("risk", "max_daily_loss_pct", default=8.0),
         open_count=len(positions),
         max_positions=cfg.get("risk", "max_concurrent_positions", default=1),
