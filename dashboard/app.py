@@ -227,8 +227,8 @@ TEMPLATE = """
         <td>{{ p.qty }}</td>
         <td>{{ p.entry_price }}</td>
         <td>{{ p.last_price }}</td>
-        <td>{{ p.current_sl }}</td>
-        <td>{{ p.current_tp }}</td>
+        <td>{{ p.current_sl }} ({{ '%+.2f'|format(p.sl_pct) }}%)</td>
+        <td>{{ p.current_tp }} ({{ '%+.2f'|format(p.tp_pct) }}%)</td>
         <td class="{{ 'pnl-pos' if p.unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(p.unrealized) }}</td>
       </tr>
       {% endfor %}
@@ -462,8 +462,11 @@ def index():
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
         leverage = trade.get("leverage") or 1
         margin_pct = (trade["qty"] * trade["entry_price"] / leverage) / equity * 100.0 if equity > 0 else 0.0
+        entry = trade["entry_price"]
+        sl_pct = (trade["current_sl"] / entry - 1) * 100.0 if entry > 0 else 0.0
+        tp_pct = (trade["current_tp"] / entry - 1) * 100.0 if entry > 0 else 0.0
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized,
-                           "margin_pct": margin_pct})
+                           "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct})
 
     total_unrealized = sum(p["unrealized"] for p in positions)
 
