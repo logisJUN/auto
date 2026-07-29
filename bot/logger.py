@@ -114,7 +114,13 @@ def compute_performance_summary(log_dir: str | Path, limit_lines: int = 5000) ->
         pending_entry = None
         for e in evs:
             event = e.get("event")
-            if event == "entry":
+            # position_adopted (an orphaned exchange position the bot found
+            # and started tracking, e.g. after a state reset) counts as an
+            # entry too -- otherwise its eventual exit has no matching entry
+            # and gets silently dropped from every stat here, undercounting
+            # win rate for exactly the trades most likely to happen after a
+            # restart, which is common on this setup.
+            if event in ("entry", "position_adopted"):
                 pending_entry = e
             elif event == "exit" and pending_entry is not None:
                 signal = pending_entry.get("signal") or {}

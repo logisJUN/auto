@@ -55,6 +55,25 @@ def test_exit_fees_paid_passed_through_to_reconstructed_trade(tmp_path):
     assert summary["trades"][0]["fees_paid"] == 0.11
 
 
+def test_position_adopted_counts_as_an_entry(tmp_path):
+    """An orphaned position the bot found and started tracking (e.g. after a
+    state reset) is logged as 'position_adopted', not 'entry' -- its eventual
+    exit must still be counted, not silently dropped from every stat.
+    """
+    events = [
+        {"event": "position_adopted", "symbol": "AAAUSDT", "side": "short",
+         "entry_price": 100.0, "qty": 1.0, "sl": 105.0, "tp": 90.0, "ts": 1},
+        {"event": "exit", "symbol": "AAAUSDT", "reason": "sl_tp_hit", "pnl": 3.0, "ts": 2},
+    ]
+    _write_decisions(tmp_path, events)
+
+    summary = compute_performance_summary(tmp_path)
+
+    assert summary["overall"]["count"] == 1
+    assert summary["overall"]["total_pnl"] == 3.0
+    assert summary["by_symbol"]["AAAUSDT"]["count"] == 1
+
+
 def test_unmatched_entry_without_exit_is_ignored(tmp_path):
     events = [
         {"event": "entry", "symbol": "CCCUSDT", "side": "long",
