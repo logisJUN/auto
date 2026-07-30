@@ -152,6 +152,18 @@ signals:
     # candles (on the shortest configured timeframe) used to find the recent
     # trading-range high/low for range_trade below.
     range_lookback: 20
+    # Step between consecutive timeframes' weight (1.0 -> weights 1,2,3 for
+    # 3 timeframes). Lowered from the 1.0 default: the 240min EMA12/26 is a
+    # 2-4 day lookback that lags a genuine fresh trend reversal, and weighing
+    # it 3x the 15min read kept the blend calling the *old* direction well
+    # after price had already turned (observed live on MUUSDT). 0.5 ->
+    # weights 1, 1.5, 2 -- still favors the higher timeframe, less extremely.
+    timeframe_weight_step: 0.5
+    # Volume score's price-direction check now looks back this many candles
+    # instead of just the last one -- a single candle (often exactly where a
+    # volume spike shows up, e.g. a pullback wick mid-uptrend) shouldn't be
+    # able to swing this component hard against the real multi-candle move.
+    volume_direction_lookback: 3
   news:
     feeds:
       - "https://www.coindesk.com/arc/outboundfeeds/rss/"

@@ -49,6 +49,49 @@ def test_volume_score_amplifies_direction_on_spike():
     assert score > 0
 
 
+def test_volume_score_not_flipped_by_a_single_pullback_candle():
+    """A brief red candle (with a volume spike) inside an ongoing uptrend
+    shouldn't swing this component bearish by itself -- direction is judged
+    over the last few candles, not just the very last one.
+    """
+    prices = [100 + i * 0.5 for i in range(25)]
+    candles = _make_candles(prices)
+    # last candle dips from the prior close, but is still above the close
+    # from 3 candles back -- net direction over that span is still up.
+    candles[-1]["close"] = candles[-2]["close"] - 0.2
+    candles[-1]["volume"] = 1000  # spike on the down-tick
+
+    score = technical.volume_score(candles, direction_lookback=3)
+
+    assert score > 0
+
+
+def test_volume_score_direction_lookback_of_one_matches_old_single_candle_behavior():
+    prices = [100 + i * 0.5 for i in range(25)]
+    candles = _make_candles(prices)
+    candles[-1]["close"] = candles[-2]["close"] - 0.2
+    candles[-1]["volume"] = 1000
+
+    score = technical.volume_score(candles, direction_lookback=1)
+
+    assert score < 0
+
+
+def test_timeframe_weight_step_reduces_slower_timeframe_dominance():
+    up_candles = _make_candles([100 + i * 0.8 for i in range(80)])    # bullish
+    down_candles = _make_candles([200 - i * 0.8 for i in range(80)])  # bearish
+    klines = {"15": up_candles, "240": down_candles}
+
+    result_default = technical.multi_timeframe_score(klines, ["15", "240"], TECH_CFG)
+    result_flatter = technical.multi_timeframe_score(
+        klines, ["15", "240"], {**TECH_CFG, "timeframe_weight_step": 0.5})
+
+    # both lean toward the slower/bearish timeframe's reading, but the
+    # flattened weighting lets the faster/bullish timeframe count for
+    # relatively more, pulling the combined score less negative.
+    assert result_flatter["score"] > result_default["score"]
+
+
 def test_range_levels_picks_high_low_over_lookback():
     prices = [100, 105, 95, 102, 98, 101, 99, 100]
     candles = _make_candles(prices)
