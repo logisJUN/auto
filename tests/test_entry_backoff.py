@@ -134,6 +134,24 @@ def test_regional_restriction_records_long_backoff(tmp_path):
     assert 1439 < remaining_min <= 1440
 
 
+def test_missing_product_agreement_records_long_backoff(tmp_path):
+    """e.g. CLUSDT (crude oil) rejecting with ErrCode 110125 -- a retry will
+    never succeed without agreeing to a product-specific terms page, so this
+    should get the same long backoff as a regional restriction.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    strategy.get_signal = lambda s, force=False: _signal()
+    client.open_position.side_effect = BybitAPIError(
+        "place_order rejected by Bybit: You must agree to the Crude Oil "
+        "Trading Terms before trading this contract. (ErrCode: 110125)")
+
+    strategy.try_enter("XUSDT")
+
+    backoff = state.get_entry_backoff("XUSDT")
+    remaining_min = (backoff["until_ts"] - time.time()) / 60
+    assert 1439 < remaining_min <= 1440
+
+
 def test_sl_tp_attach_failure_records_backoff(tmp_path):
     from bot.exchange.bybit_client import BybitAPIError as _BAE
 

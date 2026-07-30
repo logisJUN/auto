@@ -25,7 +25,12 @@ logger = logging.getLogger("bot.strategy")
 # a symbol this account/region is permanently barred from trading) -- worth a
 # much longer backoff than a transient failure like insufficient margin, which
 # can resolve itself as soon as something else closes.
-_PERMANENT_ENTRY_ERROR_CODES = ("110132",)  # regional restriction
+_PERMANENT_ENTRY_ERROR_CODES = (
+    "110132",  # regional restriction
+    "110125",  # requires a specific product agreement (e.g. commodity/CFD-style
+               # contracts like CLUSDT crude oil) this account hasn't accepted --
+               # not something a retry will ever fix.
+)
 
 
 def _today_utc() -> str:
@@ -593,11 +598,6 @@ class Strategy:
             logger.warning("no exchange closed-pnl record yet for %s, using price-based "
                             "estimate (fees not included)", symbol)
 
-        if reason == "stale_timeout":
-            cooldown_min = self.trade_cfg.get("stale_reentry_cooldown_min", 30)
-            if cooldown_min > 0:
-                self.state.set_stale_cooldown(symbol, trade["side"], time.time() + cooldown_min * 60)
-
         # Splits the final leg's pnl into gross price movement vs. implied fees,
         # so a loss can be told apart as "the market moved against us" vs. "we
         # were basically flat and just paid the round-trip fee" -- previously
@@ -617,6 +617,18 @@ class Strategy:
         # into state via add_realized_pnl() when it happened, so it's not re-added
         # here, only folded into the number shown/recorded for this trade.
         total_pnl = pnl + trade.get("partial_realized_pnl", 0.0)
+
+        # Block a same-symbol/same-direction re-entry for a while after ANY
+        # losing close, not just stale_timeout -- observed live as a symbol
+        # stuck in a strong trend getting shorted, stopped out for a real
+        # loss, and re-shorted within minutes on the same still-noisy read,
+        # losing again. A genuine reversal (signal now favors the other side)
+        # is unaffected; only a same-direction re-entry is blocked.
+        if total_pnl < 0:
+            cooldown_min = self.trade_cfg.get("loss_reentry_cooldown_min", 30)
+            if cooldown_min > 0:
+                self.state.set_stale_cooldown(symbol, trade["side"], time.time() + cooldown_min * 60)
+
         self.state.record_closed_trade({
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "exit_price": exit_price, "qty": trade["qty"], "pnl": total_pnl, "reason": reason,

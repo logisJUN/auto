@@ -1,9 +1,11 @@
-"""trade_management.stale_reentry_cooldown_min: after a stale_timeout close,
-block a same-symbol/same-direction re-entry for a while -- observed live as a
-symbol stuck in a tight range getting shorted, stale-timed-out, and
-immediately re-shorted in a fee-bleeding loop. A genuine reversal (signal now
-favors the other side) must not be blocked.
+"""trade_management.loss_reentry_cooldown_min: after ANY losing close (not
+just stale_timeout), block a same-symbol/same-direction re-entry for a while.
+Observed live: a symbol stuck in a strong trend got shorted, stopped out for
+a real sl_tp_hit loss, and was re-shorted within minutes on the same
+still-noisy read, losing again. A genuine reversal (signal now favors the
+other side) must not be blocked.
 """
+import time
 from unittest.mock import MagicMock
 
 from bot.config import Config, Secrets
@@ -21,7 +23,7 @@ TRADE_CFG = {
     "flash_move_window_sec": 45,
     "reversal_exit_score": 0.4, "reversal_exit_confidence": 0.6,
     "stale_exit_after_min": 60, "stale_exit_max_move_pct": 0.5,
-    "stale_reentry_cooldown_min": 30,
+    "loss_reentry_cooldown_min": 30,
     "range_trade": {"enabled": True, "edge_atr_mult": 0.5, "max_range_width_atr_mult": 4.0,
                     "atr_sl_multiplier": 1.0, "atr_tp_multiplier": 1.0},
 }
@@ -84,7 +86,7 @@ def _signal(confidence=0.9, direction="short"):
             "range_high": 0.0, "range_low": 0.0, "components": {}}
 
 
-def test_stale_close_records_a_cooldown(tmp_path):
+def test_losing_stale_timeout_close_records_a_cooldown(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
     trade = stop_manager.new_trade("XUSDT", "short", entry_price=100.0, qty=1.0, atr=1.0, cfg=TRADE_CFG)
 
@@ -95,9 +97,34 @@ def test_stale_close_records_a_cooldown(tmp_path):
     assert cooldown["side"] == "short"
 
 
+def test_losing_sl_tp_hit_close_also_records_a_cooldown(tmp_path):
+    """The whole point of the generalization: a real directional loss (not
+    just a stale/going-nowhere close) must also trigger the cooldown.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    trade = stop_manager.new_trade("XUSDT", "short", entry_price=100.0, qty=1.0, atr=1.0, cfg=TRADE_CFG)
+
+    strategy._close_and_settle("XUSDT", trade, "sl_tp_hit", already_closed=True)
+
+    cooldown = state.get_stale_cooldown("XUSDT")
+    assert cooldown is not None
+    assert cooldown["side"] == "short"
+
+
+def test_profitable_close_does_not_record_a_cooldown(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    client.get_closed_pnl.return_value = {
+        "closed_pnl": 2.0, "avg_exit_price": 100.0, "updated_time_ms": 99999999999999,
+    }
+    trade = stop_manager.new_trade("XUSDT", "short", entry_price=100.0, qty=1.0, atr=1.0, cfg=TRADE_CFG)
+
+    strategy._close_and_settle("XUSDT", trade, "sl_tp_hit", already_closed=True)
+
+    assert state.get_stale_cooldown("XUSDT") is None
+
+
 def test_same_direction_reentry_blocked_during_cooldown(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    import time
     state.set_stale_cooldown("XUSDT", "short", until_ts=time.time() + 60)
     strategy.get_signal = lambda s, force=False: _signal(direction="short")
 
@@ -109,7 +136,6 @@ def test_same_direction_reentry_blocked_during_cooldown(tmp_path):
 
 def test_opposite_direction_reentry_not_blocked_during_cooldown(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    import time
     state.set_stale_cooldown("XUSDT", "short", until_ts=time.time() + 60)
     strategy.get_signal = lambda s, force=False: _signal(direction="long")
 
@@ -121,7 +147,6 @@ def test_opposite_direction_reentry_not_blocked_during_cooldown(tmp_path):
 
 def test_reentry_allowed_once_cooldown_expires(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
-    import time
     state.set_stale_cooldown("XUSDT", "short", until_ts=time.time() - 1)  # already expired
     strategy.get_signal = lambda s, force=False: _signal(direction="short")
 
@@ -132,19 +157,10 @@ def test_reentry_allowed_once_cooldown_expires(tmp_path):
 
 
 def test_cooldown_disabled_when_config_value_is_zero(tmp_path):
-    cfg_no_cooldown = {**TRADE_CFG, "stale_reentry_cooldown_min": 0}
+    cfg_no_cooldown = {**TRADE_CFG, "loss_reentry_cooldown_min": 0}
     strategy, state, client = _make_strategy(tmp_path, trade_cfg=cfg_no_cooldown)
     trade = stop_manager.new_trade("XUSDT", "short", entry_price=100.0, qty=1.0, atr=1.0, cfg=cfg_no_cooldown)
 
     strategy._close_and_settle("XUSDT", trade, "stale_timeout", already_closed=True)
-
-    assert state.get_stale_cooldown("XUSDT") is None
-
-
-def test_other_close_reasons_do_not_record_a_cooldown(tmp_path):
-    strategy, state, client = _make_strategy(tmp_path)
-    trade = stop_manager.new_trade("XUSDT", "short", entry_price=100.0, qty=1.0, atr=1.0, cfg=TRADE_CFG)
-
-    strategy._close_and_settle("XUSDT", trade, "sl_tp_hit", already_closed=True)
 
     assert state.get_stale_cooldown("XUSDT") is None
