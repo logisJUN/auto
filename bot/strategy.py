@@ -800,6 +800,7 @@ class Strategy:
             screened = universe.screen_top_symbols(
                 self.client, quote_suffix="USDT", top_n=top_n,
                 max_taker_fee_rate=self.universe_cfg.get("max_taker_fee_rate"),
+                min_max_leverage=self.universe_cfg.get("min_max_leverage"),
                 excluded_symbols=set(self.universe_cfg.get("excluded_symbols", [])),
             )
         except Exception:

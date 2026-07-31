@@ -1,16 +1,25 @@
 from bot.signals import universe
 
 
+class FakeInstrumentInfo:
+    def __init__(self, max_leverage):
+        self.max_leverage = max_leverage
+
+
 class FakeClient:
-    def __init__(self, tickers, fee_rates=None):
+    def __init__(self, tickers, fee_rates=None, max_leverages=None):
         self._tickers = tickers
         self._fee_rates = fee_rates or {}
+        self._max_leverages = max_leverages or {}
 
     def get_all_tickers(self):
         return self._tickers
 
     def get_taker_fee_rate(self, symbol):
         return self._fee_rates.get(symbol)
+
+    def get_instrument_info(self, symbol):
+        return FakeInstrumentInfo(self._max_leverages.get(symbol, 25.0))
 
 
 def test_ranks_by_turnover_and_filters_quote_suffix():
@@ -98,3 +107,33 @@ def test_excluded_symbols_empty_by_default():
     client = FakeClient(tickers)
     result = universe.screen_top_symbols(client, top_n=1)
     assert result == ["SOXLUSDT"]
+
+
+def test_leverage_filter_skips_low_leverage_symbols_and_backfills():
+    # ranked by turnover: LOWLEV (best) > OK1 > OK2 -- LOWLEV should be dropped
+    # for its low max leverage (like a CFD-style stock/commodity token) and
+    # backfilled by the next-best real-crypto-leverage candidate.
+    tickers = [
+        {"symbol": "LOWLEVUSDT", "turnover24h": "1000"},
+        {"symbol": "OK1USDT", "turnover24h": "900"},
+        {"symbol": "OK2USDT", "turnover24h": "800"},
+    ]
+    max_leverages = {"LOWLEVUSDT": 10.0, "OK1USDT": 25.0, "OK2USDT": 25.0}
+    client = FakeClient(tickers, max_leverages=max_leverages)
+    result = universe.screen_top_symbols(client, top_n=2, min_max_leverage=12.5, candidate_pool_mult=4)
+    assert result == ["OK1USDT", "OK2USDT"]
+    assert "LOWLEVUSDT" not in result
+
+
+def test_leverage_filter_disabled_by_default_keeps_low_leverage_symbol():
+    tickers = [{"symbol": "LOWLEVUSDT", "turnover24h": "1000"}]
+    client = FakeClient(tickers, max_leverages={"LOWLEVUSDT": 10.0})
+    result = universe.screen_top_symbols(client, top_n=1)  # min_max_leverage=None (default)
+    assert result == ["LOWLEVUSDT"]
+
+
+def test_leverage_at_or_above_the_floor_is_not_filtered():
+    tickers = [{"symbol": "OKUSDT", "turnover24h": "1000"}]
+    client = FakeClient(tickers, max_leverages={"OKUSDT": 12.5})
+    result = universe.screen_top_symbols(client, top_n=1, min_max_leverage=12.5)
+    assert result == ["OKUSDT"]

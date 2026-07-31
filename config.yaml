@@ -37,6 +37,19 @@ exchange:
     # fee-filtered symbol. Add to this list as new offenders turn up.
     excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "SKHYUSDT", "XAUTUSDT", "TSLAUSDT", "CLUSDT",
                        "XAGUSDT", "SPCXUSDT", "SNDKUSDT"]
+    # Systematic backstop for the same tokenized-stock/commodity problem above,
+    # instead of only reacting one ticker at a time as each new lookalike shows
+    # up live (SKHYNIXUSDT and a second ticker for the very same underlying,
+    # SKHYUSDT, both had to be caught this way). Real crypto perpetuals on
+    # Bybit are almost always offered at 12.5x+ even for lower-liquidity alts,
+    # while these CFD-style stock/commodity contracts are typically capped much
+    # lower -- a candidate symbol whose own exchange-reported max leverage
+    # falls below this floor is skipped, same as a fee-filtered one. Kept
+    # conservative (10x) to minimize the risk of dropping a legitimate
+    # low-liquidity altcoin; does not replace excluded_symbols above, which
+    # still short-circuits a known bad symbol without an extra API call. null
+    # disables this check.
+    min_max_leverage: 10.0
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
