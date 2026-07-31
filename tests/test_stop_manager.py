@@ -159,3 +159,73 @@ def test_stale_position_fires_without_pressure_once_past_the_longer_timeout():
     trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=CFG)
     trade["opened_at"] = time.time() - 241 * 60  # past both timeouts
     assert stop_manager.check_stale_position(trade, current_price=100.1, cfg=CFG, capital_pressure=False)
+
+
+# -- adverse-move stop tightening -----------------------------------------------------------------
+
+ADVERSE_CFG = {
+    **CFG,
+    "adverse_tighten_start_rr": 0.5,
+    "adverse_tighten_confidence_floor": 0.5,
+    "adverse_tighten_score_floor": 0.15,
+    "adverse_tighten_atr_multiplier": 0.5,
+}
+
+
+def test_adverse_tighten_pulls_sl_in_when_losing_and_signal_faded():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    # initial_sl = 100 - 2*1.5 = 97; price at 98.3 -> profit_r = (98.3-100)/3 = -0.57 <= -0.5
+    faded_signal = {"direction": "long", "score": 0.05, "confidence": 0.9}  # score below floor
+    result = stop_manager.update_trailing_and_tp(trade, 98.3, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+
+    assert result["sl_changed"]
+    assert "adverse_tighten" in result["reason"]
+    # candidate = 98.3 - 2*0.5 = 97.3, tighter (higher) than the original 97 SL --
+    # caps this loss at ~0.9R instead of riding to the full 1.0R initial SL.
+    assert trade["current_sl"] == 97.3
+
+
+def test_adverse_tighten_triggers_on_low_confidence_even_if_direction_unchanged():
+    trade = stop_manager.new_trade("BTCUSDT", "short", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    # initial_sl = 100 + 3 = 103; price at 101.7 -> profit_r = (100-101.7)/3 = -0.57 <= -0.5
+    low_conf_signal = {"direction": "short", "score": 0.5, "confidence": 0.2}  # confidence below floor
+    result = stop_manager.update_trailing_and_tp(trade, 101.7, atr=2, agg_signal=low_conf_signal, cfg=ADVERSE_CFG)
+
+    assert result["sl_changed"]
+    assert trade["current_sl"] == 102.7  # 101.7 + 2*0.5, tighter than the original 103
+
+
+def test_adverse_tighten_triggers_on_outright_reversal():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    flipped_signal = {"direction": "short", "score": -0.6, "confidence": 0.9}
+    result = stop_manager.update_trailing_and_tp(trade, 98.3, atr=2, agg_signal=flipped_signal, cfg=ADVERSE_CFG)
+    assert result["sl_changed"]
+    assert "adverse_tighten" in result["reason"]
+
+
+def test_adverse_tighten_not_triggered_while_signal_still_strongly_supports_the_trade():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    strong_bullish = {"direction": "long", "score": 0.6, "confidence": 0.8}
+    result = stop_manager.update_trailing_and_tp(trade, 98.3, atr=2, agg_signal=strong_bullish, cfg=ADVERSE_CFG)
+    assert not result["sl_changed"]
+    assert trade["current_sl"] == 97.0  # untouched initial SL
+
+
+def test_adverse_tighten_not_triggered_before_the_rr_threshold():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    # price at 99.5 -> profit_r = (99.5-100)/3 = -0.17, shallower than -0.5 threshold
+    faded_signal = {"direction": "long", "score": 0.0, "confidence": 0.0}
+    result = stop_manager.update_trailing_and_tp(trade, 99.5, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+    assert not result["sl_changed"]
+
+
+def test_adverse_tighten_never_loosens_stop():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    faded_signal = {"direction": "long", "score": 0.0, "confidence": 0.0}
+    stop_manager.update_trailing_and_tp(trade, 98.3, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+    tightened_sl = trade["current_sl"]  # 97.3
+    # price keeps falling further against the position -- the freshly computed
+    # candidate (97.5 - 2*0.5 = 96.5) is now looser (lower) than what's already
+    # locked in, since it's anchored off a lower current price. Must not revert.
+    stop_manager.update_trailing_and_tp(trade, 97.5, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+    assert trade["current_sl"] == tightened_sl

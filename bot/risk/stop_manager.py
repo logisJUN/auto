@@ -141,6 +141,26 @@ def profit_r(trade: dict, current_price: float) -> float:
     return (trade["entry_price"] - current_price) / r
 
 
+def _signal_no_longer_supports(side: str, agg_signal: dict, cfg: dict) -> bool:
+    """True if the signal that justified this position no longer backs it --
+    used to gate adverse-move stop tightening, so a losing-but-still-intact
+    trade isn't cut short just because price dipped (that's what the ATR-sized
+    initial SL is already for). Deliberately a softer bar than
+    check_signal_reversal (which requires a strong flip and forces a full
+    exit): fading confidence or a score drifting toward flat also counts here,
+    since the point is to cap further downside, not force an immediate exit.
+    """
+    conf_floor = cfg.get("adverse_tighten_confidence_floor", 0.5)
+    if agg_signal.get("confidence", 0.0) < conf_floor:
+        return True
+    same_direction = (side == "long" and agg_signal.get("direction") == "long") or \
+                      (side == "short" and agg_signal.get("direction") == "short")
+    if not same_direction:
+        return True
+    score_floor = cfg.get("adverse_tighten_score_floor", 0.15)
+    return abs(agg_signal.get("score", 0.0)) < score_floor
+
+
 def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_signal: dict, cfg: dict) -> dict:
     """Mutates trade's current_sl/current_tp in place (favorable direction only) and
     returns {"sl_changed": bool, "tp_changed": bool, "reason": str} for logging/API calls.
@@ -186,6 +206,36 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
                 trade["current_sl"] = candidate_sl
                 result["sl_changed"] = True
                 result["reason"] += "trail;"
+
+    # Adverse-move stop tightening: the mirror image of breakeven/trailing above,
+    # which only ever protect a position once it's WINNING. A losing position
+    # currently rides its full initial SL distance no matter what -- even once
+    # the very reasoning that justified holding through the drawdown has
+    # stopped supporting it (confidence faded, or the signal flipped outright).
+    # Observed live: a fixed win rate (~44%) with continued net equity erosion
+    # points at losing trades costing more than winners gain, not a bad hit
+    # rate -- cutting the *size* of losses once the thesis is no longer intact
+    # is the direct lever on that, without touching entries at all.
+    #
+    # Only tightens (never loosens, same invariant as trailing) and only once
+    # the position is underwater by at least adverse_tighten_start_rr -- a
+    # normal early drawdown on an otherwise-intact signal is not touched.
+    adverse_start_rr = cfg.get("adverse_tighten_start_rr", 0.0)
+    if adverse_start_rr and cur_profit_r <= -abs(adverse_start_rr) and \
+            _signal_no_longer_supports(side, agg_signal, cfg):
+        tighten_mult = cfg.get("adverse_tighten_atr_multiplier", 0.5)
+        if side == "long":
+            candidate_sl = current_price - atr * tighten_mult
+            if candidate_sl > trade["current_sl"]:
+                trade["current_sl"] = candidate_sl
+                result["sl_changed"] = True
+                result["reason"] += "adverse_tighten;"
+        else:
+            candidate_sl = current_price + atr * tighten_mult
+            if candidate_sl < trade["current_sl"]:
+                trade["current_sl"] = candidate_sl
+                result["sl_changed"] = True
+                result["reason"] += "adverse_tighten;"
 
     # extend TP if price has approached it but signals still strongly favor continuation
     remaining = abs(trade["current_tp"] - current_price)

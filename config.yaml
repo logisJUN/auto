@@ -43,10 +43,13 @@ risk:
   # equity * position_size_pct_of_equity / 100 * leverage.
   # NOTE: unlike a risk-per-trade-% scheme, the loss if SL is hit is NOT fixed to
   # a set % of equity here -- it depends on leverage and stop-loss distance.
-  # At 45% + a 10% margin_buffer_pct reserve (90% max in use), both BTCUSDT and
-  # ETHUSDT get a full 45% allocation with 10% always left as slack for fees/
-  # exchange-side margin requirements (e.g. $100 equity -> $45 + $45 + $10 spare).
-  position_size_pct_of_equity: 45.0
+  # At 30% + a 10% margin_buffer_pct reserve, up to 3 positions can be sized
+  # concurrently with 10% always left as slack for fees/exchange-side margin
+  # requirements. Lowered from 45%: at the account's current (much smaller)
+  # equity, 45% per position meant a single stopped-out trade took an outsized
+  # bite out of total capital -- shrinking the per-trade bet size directly
+  # slows the rate equity can erode while win-rate/R:R fixes take effect.
+  position_size_pct_of_equity: 30.0
   # always keep at least this % of equity as an unused margin reserve. A new
   # position's margin is capped to min(position_size_pct_of_equity% of equity,
   # remaining headroom under this reserve) -- so it's sized down (or skipped)
@@ -113,8 +116,12 @@ risk:
   # even when the margin sizing itself looks normal (observed live: KORUUSDT's
   # own stress-test figure hit ~24% of equity from a 6.4% SL distance at 7x
   # leverage). A single trade shouldn't alone be able to exceed the whole
-  # day's loss budget. 0 disables this check.
-  max_position_risk_pct: 8.0
+  # day's loss budget. Lowered from 8%: at the account's current (much
+  # smaller) equity, letting any single trade risk 8% on its own is too large
+  # a bite per loss given a ~44% win rate -- 4% caps the worst case for one
+  # bad trade to roughly a quarter of the whole daily loss budget. 0 disables
+  # this check.
+  max_position_risk_pct: 4.0
   # bot stops opening new trades once this many are open at the same time.
   max_concurrent_positions: 4
   # minimum aggregated confidence (0-1) required to open a position at all.
@@ -258,6 +265,28 @@ trade_management:
   # genuine reversal (signal now favors the other side) is not blocked. 0
   # disables this.
   loss_reentry_cooldown_min: 30
+
+  # Adverse-move stop tightening: the mirror of breakeven/trailing above, which
+  # only ever protect a position once it's WINNING. A losing position normally
+  # rides its full initial SL distance no matter what, even once the signal
+  # that justified it has stopped supporting it. With win rate holding around
+  # ~44% but equity still eroding, the losing side's average loss size -- not
+  # the hit rate -- is the direct lever: once a position is underwater by at
+  # least adverse_tighten_start_rr (as a multiple of initial risk) AND the
+  # signal has faded (confidence below adverse_tighten_confidence_floor, OR
+  # flipped direction, OR its score has drifted below adverse_tighten_score_floor),
+  # SL is pulled in to current_price +/- atr * adverse_tighten_atr_multiplier
+  # instead of waiting for the full initial SL. Only ever tightens, same as
+  # trailing -- a losing trade whose signal is still intact is left alone to
+  # ride its normal SL/TP. Must stay meaningfully below atr_sl_multiplier (1.5)
+  # for this to actually improve on the initial SL rather than being a no-op;
+  # 0.5 caps a stopped-out loss at roughly two-thirds of the original risk
+  # once the signal has faded, instead of the full initial distance.
+  # 0 (adverse_tighten_start_rr) disables this.
+  adverse_tighten_start_rr: 0.5
+  adverse_tighten_confidence_floor: 0.5
+  adverse_tighten_score_floor: 0.15
+  adverse_tighten_atr_multiplier: 0.5
 
   # Entry-failure backoff: after a failed entry attempt, block retrying the
   # same symbol for a while instead of hammering it every tick (observed live:
