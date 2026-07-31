@@ -35,7 +35,8 @@ exchange:
     # wouldn't (observed live: SKHYNIXUSDT rejected with ErrCode 110132).
     # Backfilled from the next-highest-turnover candidate just like a
     # fee-filtered symbol. Add to this list as new offenders turn up.
-    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "XAUTUSDT", "TSLAUSDT", "CLUSDT"]
+    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "XAUTUSDT", "TSLAUSDT", "CLUSDT",
+                       "XAGUSDT", "SPCXUSDT", "SNDKUSDT"]
 
 risk:
   # margin allocated per position, as % of account equity. Position notional =
