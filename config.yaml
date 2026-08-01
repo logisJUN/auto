@@ -136,12 +136,20 @@ risk:
   # this check.
   max_position_risk_pct: 4.0
   # bot stops opening new trades once this many are open at the same time.
-  max_concurrent_positions: 4
+  # Lowered from 4: every entry pays a fixed ~0.11% (of notional) round-trip
+  # fee regardless of outcome, and it disproportionately eats into the small
+  # wins that breakeven/trailing tend to lock in vs. the larger losses that
+  # ride out further -- fewer concurrent slots means fewer of these
+  # fee-guaranteed round trips per day on marginal setups.
+  max_concurrent_positions: 3
   # minimum aggregated confidence (0-1) required to open a position at all.
   # 0.55-0.70 trades accounted for most of a day's realized loss (7 trades,
   # -2.88 USDT) while higher-confidence trades held up meaningfully better --
-  # raised to cut off that weak bucket.
-  min_confidence_to_enter: 0.65
+  # raised to cut off that weak bucket. Raised again from 0.65: even with that
+  # bucket cut off, no day has closed net positive yet -- the fee drag per
+  # trade (paid on every entry regardless of outcome) means only the more
+  # convincing setups are worth paying it for.
+  min_confidence_to_enter: 0.70
   # skip entries entirely (trend or range) when the execution-timeframe ATR is
   # below this % of price -- a dead/chopping market where the likely move
   # doesn't clearly clear the ~0.11% round-trip taker fee. 0 disables this check.
