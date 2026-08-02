@@ -222,14 +222,24 @@ trade_management:
   # initial take-profit distance = atr * this multiplier
   atr_tp_multiplier: 2.5
   # once unrealized profit reaches this multiple of the initial risk (R),
-  # start trailing (move SL to breakeven and beyond).
-  breakeven_after_rr: 0.5
+  # start trailing (move SL to breakeven and beyond). Raised from 0.5: winning
+  # trades were repeatedly getting clipped for a near-zero gain within minutes
+  # of breakeven triggering (observed live: UNIUSDT and ZECUSDT both hit their
+  # breakeven SL just 3 minutes after it was set), never reaching the 1R
+  # partial-tp/TP zone -- 0.5R was too shallow to distinguish a real move from
+  # ordinary noise.
+  breakeven_after_rr: 0.7
   # breakeven SL is placed this many ATR past entry (favorable direction), not
   # exactly at entry -- an unbuffered breakeven stop gets clipped by ordinary
   # noise (price revisiting its own entry level is common mid-trend), turning
   # a real trend into a string of small losses. The buffer both requires a
   # real move to trigger and locks in a small win instead when it does.
-  breakeven_buffer_atr_mult: 0.2
+  # Raised from 0.2: at 0.2, the locked-in win was only ~13% of the initial
+  # risk (R) -- still tight enough to clip on routine noise for a near-zero
+  # gain. 0.4 (~27% of R) requires a more real pullback to trigger and locks
+  # in a more meaningful win when it does, directly targeting the average-win
+  # side of the win/loss size asymmetry (avg loss was running ~5x avg win).
+  breakeven_buffer_atr_mult: 0.4
   trail_activation_rr: 1.0
   # lock in profit on part of the position once it reaches at_rr multiples of
   # initial risk, closing close_fraction of the qty at market and letting the
