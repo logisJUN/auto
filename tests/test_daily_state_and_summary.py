@@ -221,3 +221,56 @@ def test_tick_syncs_daily_state_even_when_every_symbol_already_has_a_position(tm
     daily = state.snapshot()["daily"]
     assert daily["realized_pnl"] == -1.5
     strategy.manage_open_position.assert_called_once_with("XUSDT")
+
+
+# -- tick() force-flattens open positions once the daily loss limit trips ---------------------------------------------------------
+
+def _open_trade(symbol="XUSDT"):
+    return {
+        "symbol": symbol, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "initial_sl": 95.0, "initial_tp": 110.0, "current_sl": 95.0, "current_tp": 110.0,
+        "risk_distance": 5.0, "entry_atr": 5.0, "breakeven_moved": False,
+        "trailing_active": False, "tp_extensions_used": 0, "partial_tp_taken": False,
+        "partial_realized_pnl": 0.0, "opened_at": 0.0,
+    }
+
+
+def test_tick_force_closes_open_positions_once_daily_loss_limit_is_breached(tmp_path):
+    """Regression: _daily_loss_breached() only ever blocked try_enter() from
+    opening NEW positions -- a position already open and losing when the cap
+    tripped kept running its normal manage_open_position() checks and could
+    keep bleeding well past the configured limit (observed live: an 8% cap
+    closed the day at -9%). Once breached, tick() must force-close every
+    still-open position instead of managing it normally.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    from bot.strategy import _today_utc
+    state.seed_daily(_today_utc(), start_equity=100.0, realized_pnl=0.0)
+    state.set_trade("XUSDT", _open_trade())
+    client.get_equity_usdt.return_value = 91.0  # -9%, past the 8% cap
+    client.get_all_open_positions.return_value = []
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 91.0
+    strategy.manage_open_position = MagicMock()  # must NOT be reached for XUSDT
+
+    strategy.tick()
+
+    client.close_position.assert_called_once()
+    strategy.manage_open_position.assert_not_called()
+    assert state.get_trade("XUSDT") is None
+
+
+def test_tick_manages_normally_when_daily_loss_within_limit(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    from bot.strategy import _today_utc
+    state.seed_daily(_today_utc(), start_equity=100.0, realized_pnl=0.0)
+    state.set_trade("XUSDT", _open_trade())
+    client.get_equity_usdt.return_value = 97.0  # -3%, under the 8% cap
+    client.get_all_open_positions.return_value = []
+    strategy.manage_open_position = MagicMock()
+
+    strategy.tick()
+
+    strategy.manage_open_position.assert_called_once_with("XUSDT")
+    client.close_position.assert_not_called()

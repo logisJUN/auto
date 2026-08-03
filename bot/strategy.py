@@ -878,6 +878,7 @@ class Strategy:
     def tick(self):
         self._refresh_universe()
         self._reconcile_orphaned_positions()
+        equity = None
         try:
             # Must run unconditionally every tick, not only from try_enter(): if
             # every watched symbol already has an open (e.g. just-adopted)
@@ -886,7 +887,8 @@ class Strategy:
             # at all -- observed live after a Render restart left today's
             # realized-pnl stuck at 0 even though real losses had already
             # happened earlier that day.
-            self._sync_daily_state(self.client.get_equity_usdt())
+            equity = self.client.get_equity_usdt()
+            self._sync_daily_state(equity)
         except BybitAPIError:
             logger.exception("failed to sync daily state this tick")
         try:
@@ -897,10 +899,25 @@ class Strategy:
         open_symbols = set(self.state.snapshot().get("trades", {}).keys())
         symbols_to_check = list(dict.fromkeys(self.symbols + list(open_symbols)))
 
+        # _daily_loss_breached() already stops try_enter() from opening anything
+        # new once tripped -- but that alone let a position that was ALREADY
+        # open and losing when the cap tripped keep bleeding past the
+        # configured limit for the rest of the day. Observed live: a day
+        # configured to stop at -8% closed at -9%, purely from open positions
+        # continuing to move against them after the cap was hit with nothing
+        # forcing them shut. Once breached, force-flatten every open position
+        # too, so the limit is an actual ceiling on the day's loss instead of
+        # just a block on new exposure.
+        daily_breach = equity is not None and self._daily_loss_breached(equity)
+
         for symbol in symbols_to_check:
             try:
-                if self.state.get_trade(symbol) is not None:
-                    self.manage_open_position(symbol)
+                trade = self.state.get_trade(symbol)
+                if trade is not None:
+                    if daily_breach:
+                        self._close_and_settle(symbol, trade, "daily_loss_limit")
+                    else:
+                        self.manage_open_position(symbol)
                 else:
                     self.try_enter(symbol)
             except BybitAPIError as exc:
