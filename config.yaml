@@ -20,7 +20,13 @@ exchange:
     # BTC/ETH that day (SOXLUSDT, an already-open position from before the
     # pin) was the day's best performer.
     enabled: true
-    top_n: 30
+    # Narrowed from 30: still diversified across multiple symbols (avoids the
+    # earlier BTC/ETH-only correlated-exposure problem above), but restricted
+    # to the higher-liquidity end of the turnover ranking -- less exposure to
+    # thinner alts prone to idiosyncratic single-catalyst moves the
+    # technical/volume-only signal (news/polymarket are zeroed for non-major
+    # symbols) has no way to see coming.
+    top_n: 15
     rescan_interval_hours: 1
     # some newly-listed/lower-liquidity perpetuals charge double the standard
     # ~0.055% taker fee -- exclude anything above this rate regardless of how
