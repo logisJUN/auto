@@ -88,6 +88,38 @@ def test_fees_unknown_when_falling_back_to_price_estimate(tmp_path):
     assert entry["gross_price_pnl"] == 1.0  # the estimate itself IS the gross figure
 
 
+def test_leverage_is_recorded_on_the_closed_trade_for_the_dashboard(tmp_path):
+    """The dashboard computes "진입 USDT" (margin actually committed) and
+    "손익%" (return on that margin) from entry_price*qty/leverage -- needs
+    leverage carried through to the closed-trade history row, not just live
+    on the open trade dict (which is discarded on close).
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    trade = _open_trade(side="long", entry=100.0, qty=1.0)
+    trade["leverage"] = 10.0
+    client.get_closed_pnl.return_value = {
+        "closed_pnl": 1.89, "avg_exit_price": 102.0, "updated_time_ms": 99999999999999,
+    }
+
+    strategy._close_and_settle("XUSDT", trade, "sl_tp_hit", already_closed=True)
+
+    entry = state.snapshot()["history"][-1]
+    assert entry["leverage"] == 10.0
+
+
+def test_leverage_is_none_on_a_trade_that_never_had_it_set(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    trade = _open_trade(side="long", entry=100.0, qty=1.0)  # no "leverage" key at all
+    client.get_closed_pnl.return_value = {
+        "closed_pnl": 1.89, "avg_exit_price": 102.0, "updated_time_ms": 99999999999999,
+    }
+
+    strategy._close_and_settle("XUSDT", trade, "sl_tp_hit", already_closed=True)
+
+    entry = state.snapshot()["history"][-1]
+    assert entry["leverage"] is None
+
+
 def test_fee_split_accounts_for_short_side_direction(tmp_path):
     strategy, state, client = _make_strategy(tmp_path)
     trade = _open_trade(side="short", entry=100.0, qty=1.0)

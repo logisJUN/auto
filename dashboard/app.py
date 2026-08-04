@@ -273,7 +273,7 @@ TEMPLATE = """
     <h2 style="font-size:1rem;">거래 이력</h2>
     {% if trade_history %}
     <table>
-      <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>손익</th><th>수수료</th><th>사유</th></tr>
+      <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>진입 USDT</th><th>손익</th><th>손익%</th><th>수수료</th><th>사유</th></tr>
       {% for t in trade_history %}
       <tr>
         <td class="small">{{ t.time_str }}</td>
@@ -282,7 +282,9 @@ TEMPLATE = """
         <td>{{ t.entry_price }}</td>
         <td>{{ t.exit_price }}</td>
         <td>{{ t.qty }}</td>
+        <td class="small">{{ '%.2f'|format(t.entry_margin_usdt) if t.entry_margin_usdt is not none else '-' }}</td>
         <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
+        <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(t.pnl_pct) + '%' if t.pnl_pct is not none else '-' }}</td>
         <td class="small">{{ '-%.4f'|format(t.fees_paid) if t.fees_paid is defined and t.fees_paid is not none else '-' }}</td>
         <td class="small">{{ t.reason }}</td>
       </tr>
@@ -514,9 +516,19 @@ def index():
 
     trade_history = []
     for t in sorted(snapshot.get("history", []), key=lambda h: h.get("closed_at", 0.0), reverse=True)[:50]:
+        leverage = t.get("leverage")
+        # Margin actually committed at entry (notional / leverage), not the
+        # notional itself -- this is what "몇 USDT로 들어갔는지" actually means
+        # for a leveraged position, and what pnl_pct (real return on the
+        # capital committed) is measured against. None for trades closed
+        # before this field existed (leverage wasn't recorded on old rows).
+        entry_margin_usdt = (t.get("entry_price", 0.0) * t.get("qty", 0.0) / leverage) if leverage else None
+        pnl_pct = (t.get("pnl", 0.0) / entry_margin_usdt * 100.0) if entry_margin_usdt else None
         trade_history.append({
             **t,
             "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(t.get("closed_at", time.time()))),
+            "entry_margin_usdt": entry_margin_usdt,
+            "pnl_pct": pnl_pct,
         })
     equity_curve = _build_equity_curve(snapshot.get("history", []))
 

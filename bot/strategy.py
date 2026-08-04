@@ -690,6 +690,7 @@ class Strategy:
             "exit_price": exit_price, "qty": trade["qty"], "pnl": total_pnl, "reason": reason,
             "pnl_is_estimate": pnl_is_estimate, "closed_at": time.time(),
             "gross_price_pnl": gross_price_pnl, "fees_paid": fees_paid,
+            "leverage": trade.get("leverage"),
         })
 
         est_tag = " (est.)" if pnl_is_estimate else ""
