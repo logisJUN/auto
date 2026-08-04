@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def default_state() -> dict:
         "history": [],      # list of closed-trade summaries (kept short)
         "stale_cooldowns": {},  # symbol -> {"side": ..., "until_ts": ...}
         "entry_backoffs": {},   # symbol -> {"until_ts": ..., "reason": ...}
+        "skip_reasons": {},     # symbol -> {"reason": ..., "ts": ...} -- last try_enter() skip
     }
 
 
@@ -131,6 +133,24 @@ class StateStore:
 
     def get_entry_backoff(self, symbol: str) -> dict | None:
         return self._state.get("entry_backoffs", {}).get(symbol)
+
+    # -- skip-reason tracking ---------------------------------------------------------
+    def set_skip_reason(self, symbol: str, reason: str):
+        """Records why try_enter() didn't open a position for `symbol` this tick --
+        overwritten every tick, not appended, so this stays a cheap "why is nothing
+        happening right now" snapshot instead of growing an unbounded log. Answers
+        the recurring "왜 지금 거래가 없어?" question straight from the dashboard
+        instead of needing a guess at which of several possible gates is active.
+        """
+        self._state["skip_reasons"][symbol] = {"reason": reason, "ts": time.time()}
+        self.save()
+
+    def clear_skip_reason(self, symbol: str):
+        self._state.get("skip_reasons", {}).pop(symbol, None)
+        self.save()
+
+    def get_skip_reason(self, symbol: str) -> dict | None:
+        return self._state.get("skip_reasons", {}).get(symbol)
 
     # -- misc ---------------------------------------------------------
     def get_last_summary_date(self) -> str | None:

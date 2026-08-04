@@ -57,11 +57,18 @@ def _get_usd_krw_rate() -> float | None:
     return rate
 
 
-def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict) -> list[dict]:
+def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip_reasons: dict | None = None) -> list[dict]:
     """Always-visible status for the pinned symbols (BTCUSDT/ETHUSDT), regardless
     of whether a position is currently open -- unlike the "open positions" table
     below, which only lists symbols with a live trade.
+
+    `skip_reasons` surfaces WHY try_enter() last passed on this symbol (recorded
+    live in Strategy.try_enter/_open/_enter_range) instead of the dashboard only
+    ever showing a generic "waiting for a signal" -- answers "지금 왜 거래가 없어?"
+    directly instead of needing a guess at which of several possible gates (daily
+    loss cap, confidence threshold, cooldown, no margin room, ...) is active.
     """
+    skip_reasons = skip_reasons or {}
     out = []
     for symbol in symbols:
         try:
@@ -70,7 +77,9 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict) -> l
             price = None
         trade = trades.get(symbol)
         if trade is None:
-            out.append({"symbol": symbol, "price": price, "status": "flat"})
+            skip = skip_reasons.get(symbol)
+            out.append({"symbol": symbol, "price": price, "status": "flat",
+                        "skip_reason": skip.get("reason") if skip else None})
             continue
         if price is not None:
             unrealized = (price - trade["entry_price"]) * trade["qty"] if trade["side"] == "long" \
@@ -176,12 +185,16 @@ TEMPLATE = """
   th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
   .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
   .small { color:#8b949e; font-size:0.75rem; }
+  .copy-btn { float:right; background:#21262d; color:#e6edf3; border:1px solid #30363d;
+              border-radius:6px; padding:6px 12px; font-size:0.85rem; }
+  .copy-btn:active { background:#30363d; }
 </style>
 </head>
 <body>
+  <button id="copy-btn" class="copy-btn" onclick="copyReview()">📋 리뷰 복사</button>
+  <div id="report">
   <h1>Bybit Futures Bot</h1>
   <span class="mode {{ 'testnet' if testnet else 'live' }}">{{ 'TESTNET (모의투자)' if testnet else 'LIVE (실거래)' }}</span>
-
   <div class="card">
     <div class="grid">
       <div><div class="stat-label">계좌 자산 (USDT)</div><div class="stat-value">{{ equity }}</div>
@@ -207,7 +220,7 @@ TEMPLATE = """
           {% if w.unrealized is not none %} / 미실현 <span class="{{ 'pnl-pos' if w.unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(w.unrealized) }}</span>{% endif %}
         </div>
         {% else %}
-        <div class="small">관망 중 - 진입 신호 대기</div>
+        <div class="small">관망 중{% if w.skip_reason %} - {{ w.skip_reason }}{% else %} - 진입 신호 대기{% endif %}</div>
         {% endif %}
       </div>
       {% endfor %}
@@ -368,6 +381,22 @@ TEMPLATE = """
   </div>
 
   <div class="small">20초마다 자동 새로고침 됩니다.</div>
+  </div>
+
+  <script>
+    function copyReview() {
+      const text = document.getElementById('report').innerText;
+      const btn = document.getElementById('copy-btn');
+      const original = btn.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = '복사됨!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      }).catch(() => {
+        btn.textContent = '복사 실패';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      });
+    }
+  </script>
 </body>
 </html>
 """
@@ -481,7 +510,7 @@ def index():
         })
 
     watched_symbols = cfg.get("exchange", "symbols", default=[])
-    watchlist = _build_watchlist(client, watched_symbols, snapshot.get("trades", {}))
+    watchlist = _build_watchlist(client, watched_symbols, snapshot.get("trades", {}), snapshot.get("skip_reasons", {}))
 
     trade_history = []
     for t in sorted(snapshot.get("history", []), key=lambda h: h.get("closed_at", 0.0), reverse=True)[:50]:

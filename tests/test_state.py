@@ -81,3 +81,31 @@ def test_entry_backoff_roundtrip(tmp_path):
 
     reloaded = StateStore(str(tmp_path / "state.json"))
     assert reloaded.get_entry_backoff("XUSDT") == {"until_ts": 12345.0, "reason": "insufficient margin"}
+
+
+def test_skip_reason_roundtrip_and_overwrite(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    assert state.get_skip_reason("XUSDT") is None
+
+    state.set_skip_reason("XUSDT", "신뢰도 부족")
+    skip = state.get_skip_reason("XUSDT")
+    assert skip["reason"] == "신뢰도 부족"
+    assert "ts" in skip
+
+    # overwritten, not appended, on the next tick's skip
+    state.set_skip_reason("XUSDT", "변동성 부족")
+    assert state.get_skip_reason("XUSDT")["reason"] == "변동성 부족"
+
+    reloaded = StateStore(str(tmp_path / "state.json"))
+    assert reloaded.get_skip_reason("XUSDT")["reason"] == "변동성 부족"
+
+
+def test_clear_skip_reason(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    state.set_skip_reason("XUSDT", "신뢰도 부족")
+    state.clear_skip_reason("XUSDT")
+    assert state.get_skip_reason("XUSDT") is None
+
+    # clearing something never set is a harmless no-op
+    state.clear_skip_reason("YUSDT")
+    assert state.get_skip_reason("YUSDT") is None

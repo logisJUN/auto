@@ -209,16 +209,20 @@ class Strategy:
 
         backoff = self.state.get_entry_backoff(symbol)
         if backoff and time.time() < backoff.get("until_ts", 0):
+            reason = f"백오프 중 ({backoff.get('reason', '')})"
             logger.debug("skip entry %s: in backoff (%s)", symbol, backoff.get("reason", ""))
+            self.state.set_skip_reason(symbol, reason)
             return
 
         equity = self.client.get_equity_usdt()
         self._sync_daily_state(equity)
         if self._daily_loss_breached(equity):
+            self.state.set_skip_reason(symbol, "일일 손실 한도 도달")
             return
 
         signal = self.get_signal(symbol)
         if signal["atr"] <= 0 or signal["close"] <= 0:
+            self.state.set_skip_reason(symbol, "가격/ATR 데이터 없음")
             return
 
         # Below this, the likely move over a trade's lifetime doesn't clearly
@@ -229,6 +233,7 @@ class Strategy:
         if atr_pct < min_atr_pct:
             logger.debug("skip entry %s: volatility too low (ATR=%.4f%% < min %.4f%%)",
                          symbol, atr_pct, min_atr_pct)
+            self.state.set_skip_reason(symbol, f"변동성 부족 (ATR {atr_pct:.3f}% < 최소 {min_atr_pct:.3f}%)")
             return
 
         direction = signal["direction"]
@@ -243,6 +248,11 @@ class Strategy:
         effective_min_conf = min_conf + same_side_count * skew_step
         is_trend_candidate = direction != "neutral" and signal["confidence"] >= effective_min_conf
 
+        if direction != "neutral" and not is_trend_candidate:
+            self.state.set_skip_reason(
+                symbol, f"신뢰도 부족 ({direction} conf={signal['confidence']:.2f} < 기준 {effective_min_conf:.2f})")
+            return
+
         # Hard cap: no matter how strong the signal, don't add yet another
         # position on a side that's already at the limit -- observed live as
         # BTC/ETH both stuck short through a sustained uptrend, each new signal
@@ -250,6 +260,7 @@ class Strategy:
         max_per_side = self.risk_cfg.get("max_concurrent_positions_per_direction", 0)
         if is_trend_candidate and max_per_side > 0 and same_side_count >= max_per_side:
             logger.debug("skip entry %s: already at max %d %s positions", symbol, max_per_side, direction)
+            self.state.set_skip_reason(symbol, f"{direction} 포지션 한도 도달 ({max_per_side}개)")
             return
 
         # Don't immediately re-open the same losing, going-nowhere trade right after
@@ -261,6 +272,8 @@ class Strategy:
             cooldown = self.state.get_stale_cooldown(symbol)
             if cooldown and cooldown.get("side") == signal["direction"] and time.time() < cooldown.get("until_ts", 0):
                 logger.debug("skip entry %s: cooling down after a stale-timeout exit on the same side", symbol)
+                remaining_min = (cooldown.get("until_ts", 0) - time.time()) / 60
+                self.state.set_skip_reason(symbol, f"재진입 쿨다운 중 (약 {remaining_min:.0f}분 남음)")
                 return
 
         # "No room" means either every slot is used, or -- more commonly at a high
@@ -271,6 +284,8 @@ class Strategy:
         if slots_full or no_margin_room:
             equity = self._make_room_for_override(symbol, signal, is_trend_candidate, equity)
             if equity is None:
+                reason = "포지션 슬롯 가득 참" if slots_full else "여유 증거금 없음"
+                self.state.set_skip_reason(symbol, f"{reason} (교체진입 조건 미충족)")
                 return  # no override -- stay on the sidelines this tick
 
         if is_trend_candidate:
@@ -423,6 +438,7 @@ class Strategy:
               log_extra: dict, msg_tag: str, equity: float):
         if margin <= 0:
             logger.info("skip entry %s: no margin headroom left (buffer reserved)", symbol)
+            self.state.set_skip_reason(symbol, "여유 증거금 없음 (버퍼 예약)")
             return
 
         prospective = stop_manager.new_trade(symbol, side, entry_price, 0.0, atr, trade_cfg)
@@ -440,6 +456,8 @@ class Strategy:
             if position_risk_pct > max_risk_pct:
                 logger.info("skip entry %s: SL-hit risk %.2f%% of equity exceeds cap %.2f%%",
                             symbol, position_risk_pct, max_risk_pct)
+                self.state.set_skip_reason(
+                    symbol, f"손절 리스크 {position_risk_pct:.1f}%가 한도 {max_risk_pct:.1f}% 초과")
                 return
 
         inst = self.client.get_instrument_info(symbol)
@@ -454,6 +472,7 @@ class Strategy:
         )
         if not sizing.ok:
             logger.info("skip entry %s: %s", symbol, sizing.reason)
+            self.state.set_skip_reason(symbol, f"주문 크기 조건 미충족 ({sizing.reason})")
             return
 
         # compute_qty_fixed_margin's floor-based math can leave floating-point
@@ -463,6 +482,7 @@ class Strategy:
         qty = self.client.round_qty(symbol, sizing.qty)
         if qty < inst.min_qty:
             logger.info("skip entry %s: qty %.10g rounds below exchange minimum %.10g", symbol, qty, inst.min_qty)
+            self.state.set_skip_reason(symbol, "수량이 거래소 최소 단위 미만")
             return
 
         try:
@@ -501,6 +521,7 @@ class Strategy:
         trade["leverage"] = leverage
         trade.update(extra_trade_fields)
         self.state.set_trade(symbol, trade)
+        self.state.clear_skip_reason(symbol)
 
         msg = (f"[진입{msg_tag}] {symbol} {side.upper()} qty={qty} entry~{entry_price:.4f} "
                f"SL={sl_price:.4f} TP={tp_price:.4f} lev={leverage}x")
@@ -523,6 +544,7 @@ class Strategy:
     def _enter_range(self, symbol: str, signal: dict, equity: float):
         range_cfg = self.trade_cfg.get("range_trade", {})
         if not range_cfg.get("enabled", False):
+            self.state.set_skip_reason(symbol, "중립 신호, 레인지 매매 비활성화")
             return
 
         range_high = signal.get("range_high", 0.0)
@@ -530,6 +552,7 @@ class Strategy:
         atr = signal["atr"]
         close = signal["close"]
         if range_high <= 0 or range_low <= 0 or range_high <= range_low:
+            self.state.set_skip_reason(symbol, "중립 신호, 레인지 데이터 부족")
             return
 
         # Range scalps use a tighter SL/TP multiplier than trend trades, so
@@ -538,6 +561,7 @@ class Strategy:
         # checked in try_enter) before even considering one.
         range_min_atr_pct = range_cfg.get("min_atr_pct", 0.0)
         if range_min_atr_pct > 0 and (atr / close * 100.0) < range_min_atr_pct:
+            self.state.set_skip_reason(symbol, "중립 신호, 레인지 매매엔 변동성 부족")
             return
 
         # a neutral aggregate score doesn't guarantee price is actually ranging --
@@ -546,6 +570,7 @@ class Strategy:
         # trend, not consolidation), so we don't fade a real breakout.
         max_width = atr * range_cfg.get("max_range_width_atr_mult", 4.0)
         if (range_high - range_low) > max_width:
+            self.state.set_skip_reason(symbol, "중립 신호, 레인지 폭이 너무 넓음(추세성)")
             return
 
         edge = atr * range_cfg.get("edge_atr_mult", 0.5)
@@ -554,6 +579,7 @@ class Strategy:
         elif close >= range_high - edge:
             side = "short"
         else:
+            self.state.set_skip_reason(symbol, "중립 신호, 레인지 중간(엣지 아님)")
             return  # price sits in the middle of the range -- no edge to fade
 
         entry_price = self.client.get_last_price(symbol)
