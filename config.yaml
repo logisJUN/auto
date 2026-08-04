@@ -219,8 +219,12 @@ signals:
 trade_management:
   # initial stop distance = atr * this multiplier
   atr_sl_multiplier: 1.5
-  # initial take-profit distance = atr * this multiplier
-  atr_tp_multiplier: 2.5
+  # initial take-profit distance = atr * this multiplier. Raised from 2.5: the
+  # loss side now gets cut earlier (adverse-move tightening) and the win side
+  # locks in a real gain sooner (breakeven_after_rr/buffer above) -- both free
+  # up room to ask more of a genuine trend before taking full profit, instead
+  # of capping the upside at the old, comparatively narrow target.
+  atr_tp_multiplier: 3.2
   # once unrealized profit reaches this multiple of the initial risk (R),
   # start trailing (move SL to breakeven and beyond). Raised from 0.5: winning
   # trades were repeatedly getting clipped for a near-zero gain within minutes
@@ -247,17 +251,27 @@ trade_management:
   # afterward). Skipped for a trade whose remaining/partial qty would round
   # below the exchange's min order size -- rides the whole position instead.
   # Not applied to range/scalp trades (see is_range_trade below).
+  # close_fraction lowered from 0.5: locking in half the position at just 1R
+  # capped how big the eventual win could register even on a trade that went
+  # on to trend much further -- 0.35 still banks real profit early for safety
+  # but leaves more size riding toward the now-wider TP/trailing exit.
   partial_tp:
     enabled: true
     at_rr: 1.0
-    close_fraction: 0.5
-  # how far (in ATR) to push SL behind price once trailing is active.
-  trail_atr_multiplier: 1.2
+    close_fraction: 0.35
+  # how far (in ATR) to push SL behind price once trailing is active. Raised
+  # from 1.2: that was tight enough to catch an ordinary pullback within a
+  # still-intact trend, capping how much of a real move actually got captured
+  # before exit.
+  trail_atr_multiplier: 1.6
   # if signals/momentum still strongly favor the position when price nears TP,
   # extend TP outward by this many ATR instead of taking profit immediately.
   tp_extend_atr_step: 0.75
   # only extend TP this many times per trade, to avoid never taking profit.
-  max_tp_extensions: 3
+  # Raised from 3 now that the base TP itself is wider -- a signal that's
+  # still strongly confirming shouldn't be cut off from riding further just
+  # because it hit an extension-count ceiling.
+  max_tp_extensions: 4
   # emergency exit: if price moves against the position within
   # flash_move_window_sec by at least flash_move_atr_mult x (that position's
   # entry-time ATR as a % of entry price), close immediately at market
