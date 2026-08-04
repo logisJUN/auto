@@ -121,6 +121,18 @@ class Strategy:
         limit = self.risk_cfg.get("max_daily_loss_pct", 8.0)
         return self.state.daily_loss_pct(equity) >= limit
 
+    def _daily_loss_derisked(self, equity: float) -> bool:
+        """A softer threshold than _daily_loss_breached: once crossed, new
+        entries still happen but smaller and more selective (see try_enter),
+        instead of trading fully normally right up until the hard stop and
+        then losing the whole rest of the day's opportunity in one binary
+        step. 0 disables (pure binary stop, same as before this existed).
+        """
+        threshold = self.risk_cfg.get("daily_loss_derisk_pct", 0.0)
+        if threshold <= 0:
+            return False
+        return self.state.daily_loss_pct(equity) >= threshold
+
     def _sync_daily_state(self, equity: float):
         """Keeps today's daily-loss-limit tracking accurate. The old behavior
         (state.ensure_daily) just reset realized_pnl to 0 whenever the local
@@ -220,6 +232,17 @@ class Strategy:
             self.state.set_skip_reason(symbol, "일일 손실 한도 도달")
             return
 
+        # Softer than the hard stop above: once today's loss crosses this
+        # threshold, keep trading but smaller and more selective instead of
+        # either "fully normal" or "fully stopped" with nothing in between --
+        # a binary circuit breaker throws away the whole rest of the day's
+        # opportunity in one step the moment it trips. Graduated de-risking
+        # keeps tightening as losses accumulate without giving up entirely
+        # before the hard cap is actually reached.
+        derisked = self._daily_loss_derisked(equity)
+        conf_add = self.risk_cfg.get("daily_loss_derisk_confidence_add", 0.0) if derisked else 0.0
+        size_mult = self.risk_cfg.get("daily_loss_derisk_size_mult", 1.0) if derisked else 1.0
+
         signal = self.get_signal(symbol)
         if signal["atr"] <= 0 or signal["close"] <= 0:
             self.state.set_skip_reason(symbol, "가격/ATR 데이터 없음")
@@ -245,12 +268,14 @@ class Strategy:
         # confidence for each one beyond the first, so a bigger pile-up needs a
         # correspondingly more convincing signal, not just "still says short".
         skew_step = self.risk_cfg.get("same_direction_confidence_step", 0.0)
-        effective_min_conf = min_conf + same_side_count * skew_step
+        effective_min_conf = min_conf + same_side_count * skew_step + conf_add
         is_trend_candidate = direction != "neutral" and signal["confidence"] >= effective_min_conf
 
         if direction != "neutral" and not is_trend_candidate:
+            derisk_tag = " [손실 완화 모드]" if derisked else ""
             self.state.set_skip_reason(
-                symbol, f"신뢰도 부족 ({direction} conf={signal['confidence']:.2f} < 기준 {effective_min_conf:.2f})")
+                symbol,
+                f"신뢰도 부족 ({direction} conf={signal['confidence']:.2f} < 기준 {effective_min_conf:.2f}){derisk_tag}")
             return
 
         # Hard cap: no matter how strong the signal, don't add yet another
@@ -280,7 +305,7 @@ class Strategy:
         # position_size_pct_of_equity + margin_buffer_pct combo -- there's simply no
         # margin headroom left even though a slot count is technically free.
         slots_full = self.state.open_trade_count() >= self.risk_cfg.get("max_concurrent_positions", 1)
-        no_margin_room = self._margin_for_new_position(equity) <= 0
+        no_margin_room = self._margin_for_new_position(equity, size_mult) <= 0
         if slots_full or no_margin_room:
             equity = self._make_room_for_override(symbol, signal, is_trend_candidate, equity)
             if equity is None:
@@ -289,9 +314,9 @@ class Strategy:
                 return  # no override -- stay on the sidelines this tick
 
         if is_trend_candidate:
-            self._enter_trend(symbol, signal, equity)
+            self._enter_trend(symbol, signal, equity, size_mult)
         elif signal["direction"] == "neutral":
-            self._enter_range(symbol, signal, equity)
+            self._enter_range(symbol, signal, equity, size_mult)
 
     def _same_side_count(self, side: str) -> int:
         return sum(1 for t in self.state.snapshot().get("trades", {}).values() if t.get("side") == side)
@@ -391,7 +416,7 @@ class Strategy:
         cache["ts"] = now
         return cache["value"]
 
-    def _margin_for_new_position(self, equity: float) -> float:
+    def _margin_for_new_position(self, equity: float, size_mult: float = 1.0) -> float:
         """Target margin (position_size_pct_of_equity% of equity), capped so total
         margin in use never exceeds equity * (1 - margin_buffer_pct/100) -- i.e. a
         reserve is always kept free rather than every slot targeting its % of
@@ -402,10 +427,13 @@ class Strategy:
         (funding fees, price moves since our last snapshot, exchange-side
         margin requirements) -- observed live as repeated ErrCode 110007
         ("insufficient margin") rejections even with a margin buffer in place.
+
+        `size_mult` scales the target down further (e.g. while the day's loss
+        has crossed daily_loss_derisk_pct) -- see _daily_loss_derisked.
         """
         buffer_pct = self.risk_cfg.get("margin_buffer_pct", 15.0)
         headroom = equity * (1 - buffer_pct / 100.0) - self._used_margin()
-        target = equity * self.risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0
+        target = equity * self.risk_cfg.get("position_size_pct_of_equity", 25.0) / 100.0 * size_mult
         margin = max(0.0, min(target, headroom))
 
         available = self._get_available_balance()
@@ -531,17 +559,18 @@ class Strategy:
                                      "entry_price": entry_price, "sl": sl_price, "tp": tp_price,
                                      "leverage": leverage, **log_extra})
 
-    def _enter_trend(self, symbol: str, signal: dict, equity: float):
+    def _enter_trend(self, symbol: str, signal: dict, equity: float, size_mult: float = 1.0):
         side = signal["direction"]
         entry_price = self.client.get_last_price(symbol)
         inst = self.client.get_instrument_info(symbol)
         leverage = self._leverage_for(symbol, inst, signal["confidence"])
-        margin = self._margin_for_new_position(equity)
+        margin = self._margin_for_new_position(equity, size_mult)
+        derisk_tag = " derisk" if size_mult < 1.0 else ""
         self._open(symbol, side, entry_price, margin, leverage, signal["atr"], self.trade_cfg,
                    extra_trade_fields={}, log_extra={"signal": signal},
-                   msg_tag=f" conf={signal['confidence']:.2f}", equity=equity)
+                   msg_tag=f" conf={signal['confidence']:.2f}{derisk_tag}", equity=equity)
 
-    def _enter_range(self, symbol: str, signal: dict, equity: float):
+    def _enter_range(self, symbol: str, signal: dict, equity: float, size_mult: float = 1.0):
         range_cfg = self.trade_cfg.get("range_trade", {})
         if not range_cfg.get("enabled", False):
             self.state.set_skip_reason(symbol, "중립 신호, 레인지 매매 비활성화")
@@ -585,11 +614,12 @@ class Strategy:
         entry_price = self.client.get_last_price(symbol)
         inst = self.client.get_instrument_info(symbol)
         leverage = self._leverage_for(symbol, inst, confidence=None)  # always use the symbol's max
-        margin = self._margin_for_new_position(equity)
+        margin = self._margin_for_new_position(equity, size_mult)
+        derisk_tag = " derisk" if size_mult < 1.0 else ""
         self._open(symbol, side, entry_price, margin, leverage, atr, range_cfg,
                    extra_trade_fields={"is_range_trade": True},
                    log_extra={"range_high": range_high, "range_low": range_low},
-                   msg_tag=":range", equity=equity)
+                   msg_tag=f":range{derisk_tag}", equity=equity)
 
     # -- exits / management ---------------------------------------------------------
     def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):

@@ -125,9 +125,21 @@ risk:
   # leverage range for any symbol NOT listed in leverage_by_symbol above -- i.e.
   # everything picked up by the dynamic universe scan.
   default_leverage_range: {min: 5, max: 8}
-  # bot stops opening new trades for the day once realized loss hits this % of
+  # bot stops opening new trades for the day (and force-flattens whatever's
+  # still open, see tick()'s daily_breach handling) once loss hits this % of
   # the equity it had at the start of the day (UTC).
   max_daily_loss_pct: 8.0
+  # Graduated de-risking instead of a hard binary stop: once today's loss
+  # crosses this softer threshold, new entries still happen but smaller
+  # (daily_loss_derisk_size_mult) and more selective
+  # (daily_loss_derisk_confidence_add added on top of min_confidence_to_enter)
+  # instead of trading fully normally right up until max_daily_loss_pct trips
+  # and the whole rest of the day's opportunity is given up in one step.
+  # Tightens progressively as losses accumulate rather than an all-or-nothing
+  # switch. 0 disables (pure binary stop, same as before this existed).
+  daily_loss_derisk_pct: 5.0
+  daily_loss_derisk_size_mult: 0.5
+  daily_loss_derisk_confidence_add: 0.1
   # Skip an entry entirely if a full SL hit on it alone would cost more than
   # this % of current equity -- (margin/equity) * leverage * sl_distance_pct.
   # Catches the case a margin/leverage cap alone doesn't: a wide ATR-based SL
