@@ -1,15 +1,20 @@
 """Strategy._reconcile_orphaned_positions(): a position can be open on the
 exchange with no corresponding entry in local state -- e.g. state.json was
-reset (a real risk on Render's free plan) or a position was opened outside the
-bot. Without this, tick() would never even look at it, since it only manages
-symbols in the watchlist or already-tracked state. Covers adoption with an
-existing SL/TP, adoption after a successful repair, closing on a failed
-repair, and leaving already-tracked positions alone.
+reset (a real risk on Render's free plan). Without this, tick() would never
+even look at it, since it only manages symbols in the watchlist or
+already-tracked state.
+
+Only a position that already has BOTH SL and TP set gets adopted -- that's
+the reliable signal it's a real bot-opened position that survived a state
+reset, since _open() always attaches both (or force-closes immediately if it
+can't). A position with neither is treated as opened outside the bot (e.g.
+manually on the Bybit app) and is left completely alone: not adopted, not
+SL/TP-repaired, not closed.
 """
 from unittest.mock import MagicMock
 
 from bot.config import Config, Secrets
-from bot.exchange.bybit_client import BybitAPIError, BybitClient
+from bot.exchange.bybit_client import BybitClient
 from bot.notify import Notifier
 from bot.risk import stop_manager
 from bot.state import StateStore
@@ -94,29 +99,21 @@ def test_adopts_orphan_keeping_its_existing_sl_tp(tmp_path):
     client.close_position.assert_not_called()
 
 
-def test_adopts_orphan_after_repairing_missing_sl_tp(tmp_path):
+def test_position_with_no_sl_tp_is_left_alone_as_presumably_manual(tmp_path):
+    """The whole point of the SL/TP-presence check: a position the user opened
+    themselves directly on the exchange, with no SL/TP, must not have one
+    forced onto it (or get closed) by the bot -- previously this was treated
+    identically to a genuinely orphaned bot position and "repaired" or killed.
+    """
     strategy, state, client = _make_strategy(tmp_path)
     strategy.get_signal = lambda s, force=False: {"atr": 1.0}
-    client.get_all_open_positions.return_value = [_orphan("ORPHANUSDT")]
-    client.update_trading_stop.return_value = {}
+    client.get_all_open_positions.return_value = [_orphan("MANUALUSDT")]
 
     strategy._reconcile_orphaned_positions()
 
-    client.update_trading_stop.assert_called_once()
-    assert state.get_trade("ORPHANUSDT") is not None
+    client.update_trading_stop.assert_not_called()
     client.close_position.assert_not_called()
-
-
-def test_closes_orphan_when_repair_fails(tmp_path):
-    strategy, state, client = _make_strategy(tmp_path)
-    strategy.get_signal = lambda s, force=False: {"atr": 1.0}
-    client.get_all_open_positions.return_value = [_orphan("ORPHANUSDT")]
-    client.update_trading_stop.side_effect = BybitAPIError("boom")
-
-    strategy._reconcile_orphaned_positions()
-
-    client.close_position.assert_called_once()
-    assert state.get_trade("ORPHANUSDT") is None
+    assert state.get_trade("MANUALUSDT") is None
 
 
 def test_already_tracked_position_is_left_alone(tmp_path):
