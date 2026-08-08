@@ -41,8 +41,8 @@ exchange:
     # wouldn't (observed live: SKHYNIXUSDT rejected with ErrCode 110132).
     # Backfilled from the next-highest-turnover candidate just like a
     # fee-filtered symbol. Add to this list as new offenders turn up.
-    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "SKHYUSDT", "XAUTUSDT", "TSLAUSDT", "CLUSDT",
-                       "XAGUSDT", "SPCXUSDT", "SNDKUSDT"]
+    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "SKHYUSDT", "XAUTUSDT", "XAUUSDT", "TSLAUSDT",
+                       "CLUSDT", "XAGUSDT", "SPCXUSDT", "SNDKUSDT"]
     # Systematic backstop for the same tokenized-stock/commodity problem above,
     # instead of only reacting one ticker at a time as each new lookalike shows
     # up live (SKHYNIXUSDT and a second ticker for the very same underlying,
