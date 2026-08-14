@@ -220,7 +220,12 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
     # Only tightens (never loosens, same invariant as trailing) and only once
     # the position is underwater by at least adverse_tighten_start_rr -- a
     # normal early drawdown on an otherwise-intact signal is not touched.
-    adverse_start_rr = cfg.get("adverse_tighten_start_rr", 0.0)
+    # A trade entered already somewhat extended (see strategy._enter_trend's
+    # chase_caution_atr_mult check) can carry its own tighter override on the
+    # trade dict instead of the global default, so that specific trade gets
+    # flagged as underwater sooner -- can't predict it'll reverse, but can
+    # react faster if it does.
+    adverse_start_rr = trade.get("adverse_tighten_start_rr_override") or cfg.get("adverse_tighten_start_rr", 0.0)
     if adverse_start_rr and cur_profit_r <= -abs(adverse_start_rr) and \
             _signal_no_longer_supports(side, agg_signal, cfg):
         tighten_mult = cfg.get("adverse_tighten_atr_multiplier", 0.5)

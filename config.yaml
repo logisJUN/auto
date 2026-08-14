@@ -187,6 +187,15 @@ risk:
   # bar, which points at entry timing (chasing exhaustion, not catching a
   # fresh move) rather than the directional call itself. 0 disables this.
   max_entry_chase_atr_mult: 3.0
+  # Below max_entry_chase_atr_mult (which blocks the entry outright), this
+  # lower threshold flags a trade that's still somewhat extended at entry --
+  # predicting whether it'll reverse isn't realistic, but reacting faster IF
+  # it does is: such a trade gets trade_management.adverse_tighten_start_rr_
+  # caution as its own tighter adverse-move-tightening trigger instead of the
+  # global default (see stop_manager.update_trailing_and_tp), so a reversal
+  # on it gets cut smaller/sooner. 0 disables (no trade ever gets the
+  # tighter override).
+  chase_caution_atr_mult: 1.5
   # Auto-pauses a symbol whose signal keeps being wrong specifically for it,
   # rather than only ever reacting to the account's overall daily loss.
   # Observed live: SNXXUSDT went 0-for-5 (every single close a loss) while
@@ -377,6 +386,12 @@ trade_management:
   adverse_tighten_confidence_floor: 0.5
   adverse_tighten_score_floor: 0.15
   adverse_tighten_atr_multiplier: 0.5
+  # Per-trade override of adverse_tighten_start_rr above, applied only to a
+  # trade entered already extended (risk.chase_caution_atr_mult) -- earlier
+  # than the global 0.5 so a chase-flavored trade that starts reversing gets
+  # noticed and cut sooner. Unset entirely (comment out / remove) to leave
+  # even flagged trades on the global default.
+  adverse_tighten_start_rr_caution: 0.25
 
   # Entry-failure backoff: after a failed entry attempt, block retrying the
   # same symbol for a while instead of hammering it every tick (observed live:

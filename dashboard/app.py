@@ -449,6 +449,9 @@ def _decision_summary(d: dict) -> str:
             breakdown = _component_breakdown(signal)
             if breakdown:
                 base += f" [{breakdown}]"
+        extension = d.get("entry_extension_atr_mult")
+        if extension is not None:
+            base += f" Ext={extension:+.1f}×ATR"
         return base
     if event == "exit":
         if d.get('pnl') is None:

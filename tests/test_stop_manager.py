@@ -229,3 +229,29 @@ def test_adverse_tighten_never_loosens_stop():
     # locked in, since it's anchored off a lower current price. Must not revert.
     stop_manager.update_trailing_and_tp(trade, 97.5, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
     assert trade["current_sl"] == tightened_sl
+
+
+def test_adverse_tighten_per_trade_override_triggers_earlier_than_global_default():
+    """A trade flagged at entry as somewhat chase-extended (see
+    strategy._enter_trend's chase_caution_atr_mult check) carries its own
+    tighter adverse_tighten_start_rr_override -- it should react to a
+    shallower drawdown than the global 0.5 default would.
+    """
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    trade["adverse_tighten_start_rr_override"] = 0.25
+    # price at 99.1 -> profit_r = (99.1-100)/3 = -0.30 -- past the 0.25 override
+    # but NOT past the global 0.5 default.
+    faded_signal = {"direction": "long", "score": 0.0, "confidence": 0.0}
+    result = stop_manager.update_trailing_and_tp(trade, 99.1, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+
+    assert result["sl_changed"]
+    assert "adverse_tighten" in result["reason"]
+
+
+def test_adverse_tighten_without_override_ignores_the_shallower_drawdown():
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    # no override set on this trade -- same 99.1 price stays under the global 0.5 threshold
+    faded_signal = {"direction": "long", "score": 0.0, "confidence": 0.0}
+    result = stop_manager.update_trailing_and_tp(trade, 99.1, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
+
+    assert not result["sl_changed"]

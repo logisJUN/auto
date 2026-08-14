@@ -586,8 +586,27 @@ class Strategy:
         leverage = self._leverage_for(symbol, inst, signal["confidence"])
         margin = self._margin_for_new_position(equity, size_mult)
         derisk_tag = " derisk" if size_mult < 1.0 else ""
+
+        # Prediction isn't realistic here -- max_entry_chase_atr_mult already
+        # blocks the clearest chase entries outright, but a trade can still
+        # land somewhat extended (just under that hard cutoff) at entry. The
+        # more achievable goal is noticing fast if THIS trade turns out to be
+        # one of those and reacting sooner: chase_caution_atr_mult flags it,
+        # and adverse_tighten_start_rr_caution (if configured) overrides this
+        # specific trade's adverse-move-tightening trigger to something
+        # earlier than the global default, so a reversal gets cut smaller.
+        extension = signal.get("recent_extension_atr_mult", 0.0)
+        chase_magnitude = extension if side == "long" else -extension
+        extra_fields = {}
+        caution_atr_mult = self.risk_cfg.get("chase_caution_atr_mult", 0.0)
+        if caution_atr_mult > 0 and chase_magnitude > caution_atr_mult:
+            caution_rr = self.trade_cfg.get("adverse_tighten_start_rr_caution")
+            if caution_rr is not None:
+                extra_fields["adverse_tighten_start_rr_override"] = caution_rr
+
         self._open(symbol, side, entry_price, margin, leverage, signal["atr"], self.trade_cfg,
-                   extra_trade_fields={}, log_extra={"signal": signal},
+                   extra_trade_fields=extra_fields,
+                   log_extra={"signal": signal, "entry_extension_atr_mult": chase_magnitude},
                    msg_tag=f" conf={signal['confidence']:.2f}{derisk_tag}", equity=equity)
 
     def _enter_range(self, symbol: str, signal: dict, equity: float, size_mult: float = 1.0):

@@ -22,6 +22,7 @@ TRADE_CFG = {
     "flash_move_window_sec": 45,
     "reversal_exit_score": 0.4, "reversal_exit_confidence": 0.6,
     "stale_exit_after_min": 60, "stale_exit_max_move_pct": 0.5,
+    "adverse_tighten_start_rr_caution": 0.25,
     "range_trade": {"enabled": True, "edge_atr_mult": 0.5, "max_range_width_atr_mult": 4.0,
                     "atr_sl_multiplier": 1.0, "atr_tp_multiplier": 1.0},
 }
@@ -35,6 +36,7 @@ RAW_CFG = {
         "max_daily_loss_pct": 8.0, "max_concurrent_positions": 4,
         "min_confidence_to_enter": 0.55, "min_order_notional_usdt": 5.0,
         "max_entry_chase_atr_mult": 3.0,
+        "chase_caution_atr_mult": 1.5,
     },
     "signals": {
         "weights": {"technical": 0.4, "volume": 0.1, "news": 0.15, "polymarket": 0.2, "funding": 0.15},
@@ -140,3 +142,43 @@ def test_chase_filter_disabled_when_threshold_is_zero(tmp_path):
     strategy.try_enter("XUSDT")
 
     client.open_position.assert_called_once()
+
+
+# -- chase_caution_atr_mult: can't predict a reversal, but can react faster if one happens -----------------------
+
+def test_entry_flags_a_tighter_adverse_override_when_moderately_extended(tmp_path):
+    """Below the hard block (3.0) but above the caution threshold (1.5) --
+    the trade still opens, but carries its own tighter adverse-move-
+    tightening trigger so a reversal on it is noticed and cut sooner.
+    """
+    strategy, state, client = _make_strategy(tmp_path)
+    strategy.get_signal = lambda s, force=False: _signal(direction="long", extension=2.0)  # 1.5 < 2.0 < 3.0
+
+    strategy.try_enter("XUSDT")
+
+    client.open_position.assert_called_once()
+    trade = state.get_trade("XUSDT")
+    assert trade["adverse_tighten_start_rr_override"] == 0.25
+
+
+def test_entry_extension_recorded_in_the_decision_log_either_way(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    strategy.get_signal = lambda s, force=False: _signal(direction="long", extension=0.5)  # well under caution
+
+    strategy.try_enter("XUSDT")
+
+    trade = state.get_trade("XUSDT")
+    assert "adverse_tighten_start_rr_override" not in trade
+
+
+def test_short_flags_the_override_using_the_sign_adjusted_magnitude(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    # extension is negative (a down move); for a short candidate that's a
+    # same-direction chase, so the sign-adjusted magnitude is +2.0
+    strategy.get_signal = lambda s, force=False: _signal(direction="short", extension=-2.0)
+
+    strategy.try_enter("XUSDT")
+
+    client.open_position.assert_called_once()
+    trade = state.get_trade("XUSDT")
+    assert trade["adverse_tighten_start_rr_override"] == 0.25
