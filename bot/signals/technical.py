@@ -132,6 +132,23 @@ def volume_score(candles: list[dict], lookback: int = 20, direction_lookback: in
     return _clip(direction * min(abs(rel_vol), 1.5) * 0.66)
 
 
+def recent_extension(candles: list[dict], atr: float, lookback: int = 6) -> float:
+    """Signed price move over the last `lookback` candles, in units of ATR --
+    positive means price has already extended upward recently, negative means
+    downward. Used to catch a "chase" entry: every existing sub-score above
+    (trend/momentum/macd/bollinger, plus volume_score) reads a big, fast
+    recent move as strong directional confirmation, with no way to tell a
+    fresh breakout apart from a spike that's already exhausted and due to
+    pull back. Observed live repeatedly: a long entered a few candles after a
+    single huge green candle, right near the local top, then drifting down.
+    """
+    df = to_dataframe(candles)
+    if len(df) < lookback + 1 or atr <= 0:
+        return 0.0
+    recent = df.tail(lookback + 1)
+    return float((recent["close"].iloc[-1] - recent["close"].iloc[0]) / atr)
+
+
 def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[str], cfg: dict) -> dict:
     """Combines per-timeframe scores, weighting longer timeframes more (trend filter).
 
@@ -168,6 +185,8 @@ def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[
                               direction_lookback=cfg.get("volume_direction_lookback", 3)) if exec_tf else 0.0
     range_info = range_levels(klines_by_tf.get(exec_tf, []), cfg.get("range_lookback", 20)) if exec_tf else \
         {"range_high": 0.0, "range_low": 0.0}
+    extension = recent_extension(klines_by_tf.get(exec_tf, []), exec_atr,
+                                  cfg.get("chase_lookback_candles", 6)) if exec_tf else 0.0
 
     return {
         "score": _clip(combined),
@@ -176,5 +195,6 @@ def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[
         "volume_score": vol_score,
         "range_high": range_info["range_high"],
         "range_low": range_info["range_low"],
+        "recent_extension_atr_mult": extension,
         "per_tf": per_tf,
     }

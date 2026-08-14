@@ -74,6 +74,7 @@ def aggregate(technical: dict, news: dict, polymarket: dict, weights: dict, fund
         "close": technical.get("close", 0.0),
         "range_high": technical.get("range_high", 0.0),
         "range_low": technical.get("range_low", 0.0),
+        "recent_extension_atr_mult": technical.get("recent_extension_atr_mult", 0.0),
         "components": components,
         "news_sample": news.get("sample", []),
         "polymarket_sample": polymarket.get("sample", []),

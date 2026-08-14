@@ -49,6 +49,23 @@ def test_missing_funding_arg_behaves_like_before_funding_existed():
     assert result["components"]["funding"]["weight"] == 0.0
 
 
+def test_recent_extension_atr_mult_passes_through_from_technical():
+    technical = {"score": 0.8, "atr": 1.0, "close": 100.0, "volume_score": 0.5,
+                 "recent_extension_atr_mult": 4.2}
+    news = {"score": 0.0, "confidence": 0.0, "sample": []}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+    result = aggregator.aggregate(technical, news, poly, WEIGHTS)
+    assert result["recent_extension_atr_mult"] == 4.2
+
+
+def test_recent_extension_atr_mult_defaults_to_zero_when_missing():
+    technical = {"score": 0.8, "atr": 1.0, "close": 100.0, "volume_score": 0.5}
+    news = {"score": 0.0, "confidence": 0.0, "sample": []}
+    poly = {"score": 0.0, "confidence": 0.0, "sample": []}
+    result = aggregator.aggregate(technical, news, poly, WEIGHTS)
+    assert result["recent_extension_atr_mult"] == 0.0
+
+
 def test_extreme_contrarian_funding_pulls_score_toward_its_own_direction():
     technical = {"score": 0.7, "atr": 1.0, "close": 100.0, "volume_score": 0.0}
     news = {"score": 0.0, "confidence": 0.0, "sample": []}

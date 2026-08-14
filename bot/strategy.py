@@ -278,6 +278,26 @@ class Strategy:
                 f"신뢰도 부족 ({direction} conf={signal['confidence']:.2f} < 기준 {effective_min_conf:.2f}){derisk_tag}")
             return
 
+        # Every technical sub-score (trend/momentum/macd/bollinger) plus
+        # volume_score reads a big, fast recent move as strong directional
+        # confirmation -- none of them can tell a fresh breakout apart from a
+        # spike that's already exhausted. Observed live repeatedly: a long
+        # entered a few candles after a single huge green candle, right near
+        # the local top (and the mirror case on shorts after a sharp drop).
+        # If the candidate's OWN direction matches a recent move that's
+        # already unusually large relative to its normal volatility, treat it
+        # as chasing rather than catching a fresh move and skip regardless of
+        # what the blended score says.
+        max_chase_atr_mult = self.risk_cfg.get("max_entry_chase_atr_mult", 0.0)
+        if is_trend_candidate and max_chase_atr_mult > 0:
+            extension = signal.get("recent_extension_atr_mult", 0.0)
+            chasing = (direction == "long" and extension > max_chase_atr_mult) or \
+                      (direction == "short" and extension < -max_chase_atr_mult)
+            if chasing:
+                self.state.set_skip_reason(
+                    symbol, f"최근 급등/급락 추격 방지 (최근 변동 {extension:+.1f}×ATR)")
+                return
+
         # Hard cap: no matter how strong the signal, don't add yet another
         # position on a side that's already at the limit -- observed live as
         # BTC/ETH both stuck short through a sustained uptrend, each new signal

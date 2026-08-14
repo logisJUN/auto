@@ -175,6 +175,18 @@ risk:
   # minimum notional order size in quote currency (USDT). Trades smaller than
   # this are skipped rather than sent (avoids exchange min-qty rejects).
   min_order_notional_usdt: 5.0
+  # Skip a trend entry if price has already moved this many multiples of ATR
+  # (over signals.technical.chase_lookback_candles) in the SAME direction as
+  # the candidate trade -- every technical sub-score reads a big, fast recent
+  # move as strong confirmation, with no way to tell a fresh breakout apart
+  # from an already-exhausted spike. Observed live repeatedly (SOLUSDT,
+  # XAUUSDT, SNXXUSDT's 0-for-5 record): longs entered a few candles after a
+  # single huge green candle, right near the local top, then drifting down --
+  # and the trend-following bucket overall (34% win rate) underperforming
+  # simple range/mean-reversion scalps (46%) despite the higher confidence
+  # bar, which points at entry timing (chasing exhaustion, not catching a
+  # fresh move) rather than the directional call itself. 0 disables this.
+  max_entry_chase_atr_mult: 3.0
 
 signals:
   weights:
@@ -211,6 +223,11 @@ signals:
     # volume spike shows up, e.g. a pullback wick mid-uptrend) shouldn't be
     # able to swing this component hard against the real multi-candle move.
     volume_direction_lookback: 3
+    # candles (on the shortest configured timeframe) used to measure how far
+    # price has already moved recently, in ATR terms -- see
+    # risk.max_entry_chase_atr_mult, which is the actual entry gate; this just
+    # sets the window that figure is measured over.
+    chase_lookback_candles: 6
   news:
     feeds:
       - "https://www.coindesk.com/arc/outboundfeeds/rss/"

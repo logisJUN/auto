@@ -1,3 +1,5 @@
+import pytest
+
 from bot.signals import technical
 
 TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
@@ -90,6 +92,36 @@ def test_timeframe_weight_step_reduces_slower_timeframe_dominance():
     # flattened weighting lets the faster/bullish timeframe count for
     # relatively more, pulling the combined score less negative.
     assert result_flatter["score"] > result_default["score"]
+
+
+def test_recent_extension_positive_after_a_sharp_up_move():
+    prices = [100.0] * 20 + [100, 101, 103, 106, 110, 115, 120]  # sharp climb at the end
+    candles = _make_candles(prices)
+    # atr=1.0 for simplicity -> a 20-point move over the last 6 candles is 20x ATR
+    ext = technical.recent_extension(candles, atr=1.0, lookback=6)
+    assert ext > 0
+    assert ext == pytest.approx((120 - 100) / 1.0)
+
+
+def test_recent_extension_negative_after_a_sharp_down_move():
+    prices = [100.0] * 20 + [100, 99, 97, 94, 90, 85, 80]  # sharp drop at the end
+    candles = _make_candles(prices)
+    ext = technical.recent_extension(candles, atr=1.0, lookback=6)
+    assert ext < 0
+
+
+def test_recent_extension_zero_on_insufficient_data_or_no_atr():
+    candles = _make_candles([100, 101, 102])
+    assert technical.recent_extension(candles, atr=1.0, lookback=6) == 0.0
+    candles_enough = _make_candles([100 + i for i in range(10)])
+    assert technical.recent_extension(candles_enough, atr=0.0, lookback=6) == 0.0
+
+
+def test_multi_timeframe_score_surfaces_recent_extension():
+    prices = [100.0] * 40 + [100, 101, 103, 106, 110, 115, 120]
+    candles = _make_candles(prices)
+    result = technical.multi_timeframe_score({"15": candles}, ["15"], TECH_CFG)
+    assert result["recent_extension_atr_mult"] > 0
 
 
 def test_range_levels_picks_high_low_over_lookback():
