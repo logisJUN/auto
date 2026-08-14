@@ -297,7 +297,7 @@ TEMPLATE = """
         <td class="small">{{ '%.2f'|format(t.entry_margin_usdt) if t.entry_margin_usdt is not none else '-' }}</td>
         <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
         <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(t.pnl_pct) + '%' if t.pnl_pct is not none else '-' }}</td>
-        <td class="small">{{ '-%.4f'|format(t.fees_paid) if t.fees_paid is defined and t.fees_paid is not none else '-' }}</td>
+        <td class="small">{{ '%+.4f'|format(-t.fees_paid) if t.fees_paid is defined and t.fees_paid is not none else '-' }}</td>
         <td class="small">{{ t.reason }}</td>
       </tr>
       {% endfor %}

@@ -42,7 +42,13 @@ exchange:
     # Backfilled from the next-highest-turnover candidate just like a
     # fee-filtered symbol. Add to this list as new offenders turn up.
     excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "SKHYUSDT", "XAUTUSDT", "XAUUSDT", "TSLAUSDT",
-                       "CLUSDT", "XAGUSDT", "SPCXUSDT", "SNDKUSDT"]
+                       "CLUSDT", "XAGUSDT", "SPCXUSDT", "SNDKUSDT", "SNXXUSDT"]
+    # SNXXUSDT specifically: its realized pnl on closed trades has run ~3x
+    # what entry/exit price times qty times leverage implies (one trade moved
+    # +2.4% in price but closed +48% in pnl on a ~7x position) -- consistent
+    # with an embedded-leverage tokenized product (like SOXLUSDT above) rather
+    # than a plain 1:1 coin, which would also explain its earlier wildly
+    # erratic record (0-for-5 losses, then two enormous wins).
     # Systematic backstop for the same tokenized-stock/commodity problem above,
     # instead of only reacting one ticker at a time as each new lookalike shows
     # up live (SKHYNIXUSDT and a second ticker for the very same underlying,
