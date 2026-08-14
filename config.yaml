@@ -187,6 +187,16 @@ risk:
   # bar, which points at entry timing (chasing exhaustion, not catching a
   # fresh move) rather than the directional call itself. 0 disables this.
   max_entry_chase_atr_mult: 3.0
+  # Auto-pauses a symbol whose signal keeps being wrong specifically for it,
+  # rather than only ever reacting to the account's overall daily loss.
+  # Observed live: SNXXUSDT went 0-for-5 (every single close a loss) while
+  # other symbols traded fine on the same signal logic over the same period
+  # -- a symbol-specific circuit breaker catches that pattern directly.
+  # Reuses the entry-backoff mechanism, so it shows up in the dashboard's
+  # skip-reason column like any other backoff. Resets to 0 on the next win.
+  # 0 disables this check.
+  symbol_pause_after_consecutive_losses: 3
+  symbol_pause_duration_min: 720
 
 signals:
   weights:

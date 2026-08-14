@@ -705,6 +705,22 @@ class Strategy:
             if cooldown_min > 0:
                 self.state.set_stale_cooldown(symbol, trade["side"], time.time() + cooldown_min * 60)
 
+        # Auto-pause a symbol whose signal keeps being wrong specifically for
+        # it, rather than only ever reacting to the account's overall daily
+        # loss. Observed live: SNXXUSDT went 0-for-5 (every close a loss)
+        # while other symbols traded fine on the same signal logic over the
+        # same period -- a symbol-specific circuit breaker catches that
+        # directly instead of waiting for the account-wide one to trip.
+        # Reuses the existing entry-backoff mechanism (same skip-reason
+        # surfacing on the dashboard as any other backoff).
+        streak = self.state.record_symbol_result(symbol, won=total_pnl >= 0)
+        pause_after = self.risk_cfg.get("symbol_pause_after_consecutive_losses", 0)
+        if pause_after > 0 and streak >= pause_after:
+            pause_min = self.risk_cfg.get("symbol_pause_duration_min", 720)
+            self.state.set_entry_backoff(symbol, time.time() + pause_min * 60,
+                                          reason=f"{streak}연속 손실")
+            self.notifier.send(f"[알림] {symbol} {streak}회 연속 손실로 {pause_min}분간 거래를 일시 정지합니다.")
+
         self.state.record_closed_trade({
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "exit_price": exit_price, "qty": trade["qty"], "pnl": total_pnl, "reason": reason,

@@ -27,6 +27,7 @@ def default_state() -> dict:
         "stale_cooldowns": {},  # symbol -> {"side": ..., "until_ts": ...}
         "entry_backoffs": {},   # symbol -> {"until_ts": ..., "reason": ...}
         "skip_reasons": {},     # symbol -> {"reason": ..., "ts": ...} -- last try_enter() skip
+        "consecutive_losses": {},  # symbol -> current losing streak (reset to 0 on a win)
     }
 
 
@@ -131,6 +132,26 @@ class StateStore:
             self._reset_flag_path.unlink()
             return True
         return False
+
+    # -- per-symbol consecutive-loss streak ---------------------------------------------------------
+    def record_symbol_result(self, symbol: str, won: bool) -> int:
+        """Updates `symbol`'s current losing streak -- incremented on a loss,
+        reset to 0 on a win -- and returns the streak after this update.
+        Lets a symbol whose signal keeps being wrong specifically for it get
+        auto-paused (see Strategy._close_and_settle's use of this alongside
+        set_entry_backoff), independent of the account-wide daily loss
+        circuit breaker. Observed live: SNXXUSDT went 0-for-5 while other
+        symbols traded fine on the same signal logic over the same period.
+        """
+        if won:
+            self._state["consecutive_losses"][symbol] = 0
+        else:
+            self._state["consecutive_losses"][symbol] = self._state["consecutive_losses"].get(symbol, 0) + 1
+        self.save()
+        return self._state["consecutive_losses"][symbol]
+
+    def get_consecutive_losses(self, symbol: str) -> int:
+        return self._state.get("consecutive_losses", {}).get(symbol, 0)
 
     # -- stale-exit re-entry cooldown ---------------------------------------------------------
     def set_stale_cooldown(self, symbol: str, side: str, until_ts: float):

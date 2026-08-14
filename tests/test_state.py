@@ -132,3 +132,31 @@ def test_daily_reset_request_visible_from_a_separate_statestore_instance(tmp_pat
     dashboard_side.request_daily_reset()
 
     assert bot_side.consume_daily_reset_request() is True
+
+
+def test_consecutive_losses_increments_on_loss(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    assert state.get_consecutive_losses("XUSDT") == 0
+
+    assert state.record_symbol_result("XUSDT", won=False) == 1
+    assert state.record_symbol_result("XUSDT", won=False) == 2
+    assert state.get_consecutive_losses("XUSDT") == 2
+
+
+def test_consecutive_losses_resets_on_a_win(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    state.record_symbol_result("XUSDT", won=False)
+    state.record_symbol_result("XUSDT", won=False)
+
+    assert state.record_symbol_result("XUSDT", won=True) == 0
+    assert state.get_consecutive_losses("XUSDT") == 0
+
+
+def test_consecutive_losses_tracked_independently_per_symbol(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    state.record_symbol_result("AUSDT", won=False)
+    state.record_symbol_result("AUSDT", won=False)
+    state.record_symbol_result("BUSDT", won=False)
+
+    assert state.get_consecutive_losses("AUSDT") == 2
+    assert state.get_consecutive_losses("BUSDT") == 1
