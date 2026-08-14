@@ -223,6 +223,54 @@ def test_tick_syncs_daily_state_even_when_every_symbol_already_has_a_position(tm
     strategy.manage_open_position.assert_called_once_with("XUSDT")
 
 
+# -- tick() honors a dashboard-requested daily-loss reset ---------------------------------------------------------
+
+def test_tick_resets_daily_loss_tracking_when_dashboard_requests_it(tmp_path):
+    """The dashboard's reset button writes a sentinel file (StateStore.
+    request_daily_reset) instead of touching state.json's "daily" key
+    directly, since the bot holds its own long-lived in-memory copy that
+    would otherwise just clobber an external file write on its next save.
+    tick() must notice the flag, reset today's tracking using fresh live
+    equity, and leave trade history alone.
+    """
+    from bot.strategy import _today_utc
+
+    strategy, state, client = _make_strategy(tmp_path)
+    state.seed_daily(_today_utc(), start_equity=100.0, realized_pnl=-9.0)  # already past an 8% cap
+    state.record_closed_trade({"symbol": "OLDUSDT", "pnl": -1.0})
+    client.get_equity_usdt.return_value = 91.0
+    client.get_all_open_positions.return_value = []
+
+    state.request_daily_reset()
+    strategy.tick()
+
+    daily = state.snapshot()["daily"]
+    assert daily["realized_pnl"] == 0.0
+    assert daily["start_equity"] == 91.0
+    assert daily["date"] == _today_utc()
+    # trade history is untouched by the reset
+    assert state.snapshot()["history"] == [{"symbol": "OLDUSDT", "pnl": -1.0}]
+    # the flag is consumed -- a second tick doesn't reset again
+    client.get_equity_usdt.return_value = 50.0
+    strategy.tick()
+    assert state.snapshot()["daily"]["start_equity"] == 91.0
+
+
+def test_tick_does_not_reset_when_no_request_is_pending(tmp_path):
+    from bot.strategy import _today_utc
+
+    strategy, state, client = _make_strategy(tmp_path)
+    state.seed_daily(_today_utc(), start_equity=100.0, realized_pnl=-9.0)
+    client.get_equity_usdt.return_value = 91.0
+    client.get_all_open_positions.return_value = []
+
+    strategy.tick()
+
+    daily = state.snapshot()["daily"]
+    assert daily["realized_pnl"] == -9.0
+    assert daily["start_equity"] == 100.0
+
+
 # -- tick() force-flattens open positions once the daily loss limit trips ---------------------------------------------------------
 
 def _open_trade(symbol="XUSDT"):

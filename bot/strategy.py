@@ -963,6 +963,19 @@ class Strategy:
             # realized-pnl stuck at 0 even though real losses had already
             # happened earlier that day.
             equity = self.client.get_equity_usdt()
+            if self.state.consume_daily_reset_request():
+                # Dashboard-requested reset: today's start_equity/realized_pnl
+                # only -- trade history is untouched. Seeding directly (rather
+                # than letting _sync_daily_state run its own reconstruction)
+                # makes this tick's fresh values authoritative even though
+                # _sync_daily_state would otherwise see today's date already
+                # recorded and skip.
+                self.state.seed_daily(_today_utc(), equity, 0.0)
+                logger.warning("daily loss tracking reset via dashboard request (equity=%.4f)", equity)
+                self.notifier.send(
+                    f"[알림] 대시보드 요청으로 오늘 손익 한도가 초기화됐습니다 (자산={equity:.4f} USDT). "
+                    f"거래 이력은 그대로 유지됩니다."
+                )
             self._sync_daily_state(equity)
         except BybitAPIError:
             logger.exception("failed to sync daily state this tick")

@@ -35,6 +35,7 @@ class StateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._state = self._load()
+        self._reset_flag_path = self.path.parent / "reset_daily_loss.flag"
 
     def _load(self) -> dict:
         if self.path.exists():
@@ -102,6 +103,34 @@ class StateStore:
         if start <= 0:
             return 0.0
         return max(0.0, (start - current_equity) / start * 100.0)
+
+    # -- dashboard-requested daily-loss reset ---------------------------------------------------------
+    def request_daily_reset(self):
+        """Called from the dashboard process -- a separate process from the
+        bot (dashboard/app.py's docstring: "so a dashboard problem can never
+        affect trading") -- to ask the bot to reset today's loss tracking
+        (start_equity/realized_pnl only; trade history is untouched) so it
+        can keep trading past max_daily_loss_pct for the rest of the day.
+
+        Writes a tiny sentinel file instead of touching state.json's "daily"
+        key directly: the bot holds its own long-lived in-memory StateStore
+        and only ever writes ITS OWN copy back to disk on its own actions, so
+        a write from another process straight into state.json would just get
+        silently clobbered by the bot's next unrelated save. The bot polls
+        for this file every tick (consume_daily_reset_request) and performs
+        the actual reset on its own live instance, which is the only way it
+        reliably sticks.
+        """
+        self._reset_flag_path.touch()
+
+    def consume_daily_reset_request(self) -> bool:
+        """True (and clears the flag) if a reset was requested since the last
+        check. Called once per tick from the bot's own process.
+        """
+        if self._reset_flag_path.exists():
+            self._reset_flag_path.unlink()
+            return True
+        return False
 
     # -- stale-exit re-entry cooldown ---------------------------------------------------------
     def set_stale_cooldown(self, symbol: str, side: str, until_ts: float):

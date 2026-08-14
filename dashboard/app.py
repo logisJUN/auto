@@ -1,6 +1,9 @@
-"""Minimal read-only monitoring dashboard, meant to be opened from Safari on an
+"""Mostly read-only monitoring dashboard, meant to be opened from Safari on an
 iPad. Runs as a separate process from the bot (deploy/dashboard.service) so a
-dashboard problem can never affect trading. Auto-refreshes every 20s; requires
+dashboard problem can never affect trading -- the one exception is the daily-
+loss reset button, which writes a tiny sentinel file the bot's own process
+polls for and acts on itself (see StateStore.request_daily_reset), rather
+than mutating shared state directly. Auto-refreshes every 20s; requires
 ?token=... matching DASHBOARD_TOKEN in .env.
 
 Run: python -m dashboard.app
@@ -12,7 +15,7 @@ import time
 from pathlib import Path
 
 import requests
-from flask import Flask, abort, render_template_string, request
+from flask import Flask, abort, redirect, render_template_string, request
 
 from bot.config import load_config
 from bot.exchange.bybit_client import BybitClient, BybitAPIError
@@ -188,6 +191,9 @@ TEMPLATE = """
   .copy-btn { float:right; background:#21262d; color:#e6edf3; border:1px solid #30363d;
               border-radius:6px; padding:6px 12px; font-size:0.85rem; }
   .copy-btn:active { background:#30363d; }
+  .reset-btn { width:100%; background:#4d1a1a; color:#ff7b72; border:1px solid #6e2323;
+               border-radius:6px; padding:10px 12px; font-size:0.85rem; font-weight:600; }
+  .reset-btn:active { background:#6e2323; }
 </style>
 </head>
 <body>
@@ -205,6 +211,12 @@ TEMPLATE = """
       <div><div class="stat-label">오늘 손익률 / 한도</div><div class="stat-value {{ 'pnl-pos' if daily_change_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(daily_change_pct) }}% / {{ max_daily_loss_pct }}%</div></div>
       <div><div class="stat-label">보유 포지션</div><div class="stat-value">{{ open_count }} / {{ max_positions }}</div></div>
     </div>
+    {% if daily_change_pct <= -max_daily_loss_pct %}
+    <form method="POST" action="/reset-daily-loss?token={{ token }}" style="margin-top:10px;"
+          onsubmit="return confirm('오늘 손익 한도를 초기화하고 거래를 재개할까요? 거래 이력은 유지됩니다.');">
+      <button type="submit" class="reset-btn">⚠️ 일일 손실 한도 초기화하고 거래 재개</button>
+    </form>
+    {% endif %}
   </div>
 
   <div class="card">
@@ -458,6 +470,22 @@ def healthz():
     return "ok", 200
 
 
+@app.route("/reset-daily-loss", methods=["POST"])
+def reset_daily_loss():
+    """Lets today's max_daily_loss_pct stop (and the force-flatten it
+    triggers) be lifted on demand instead of waiting for UTC day rollover --
+    trade history/decisions.jsonl are untouched, only today's start_equity/
+    realized_pnl tracking resets. Doesn't reset state.json directly (see the
+    module docstring and StateStore.request_daily_reset for why); just flags
+    the bot's own process to do it on its next tick.
+    """
+    _check_token()
+    state = StateStore(os.path.join(os.getenv("DATA_DIR", "data"), "state.json"))
+    state.request_daily_reset()
+    token = request.args.get("token", "")
+    return redirect(f"/?token={token}")
+
+
 @app.route("/")
 def index():
     _check_token()
@@ -537,6 +565,7 @@ def index():
 
     return render_template_string(
         TEMPLATE,
+        token=request.args.get("token", ""),
         testnet=cfg.secrets.bybit_testnet,
         equity=round(equity, 4),
         equity_krw=equity_krw,

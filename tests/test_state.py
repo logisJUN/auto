@@ -109,3 +109,26 @@ def test_clear_skip_reason(tmp_path):
     # clearing something never set is a harmless no-op
     state.clear_skip_reason("YUSDT")
     assert state.get_skip_reason("YUSDT") is None
+
+
+def test_daily_reset_request_roundtrip(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    assert state.consume_daily_reset_request() is False  # nothing requested yet
+
+    state.request_daily_reset()
+    assert state.consume_daily_reset_request() is True
+    # consuming clears it -- a second check right after finds nothing
+    assert state.consume_daily_reset_request() is False
+
+
+def test_daily_reset_request_visible_from_a_separate_statestore_instance(tmp_path):
+    """The whole point: the dashboard process writes the request through its
+    own StateStore instance, and the bot's separately-running process (its
+    own StateStore instance, same underlying file) must see it.
+    """
+    dashboard_side = StateStore(str(tmp_path / "state.json"))
+    bot_side = StateStore(str(tmp_path / "state.json"))
+
+    dashboard_side.request_daily_reset()
+
+    assert bot_side.consume_daily_reset_request() is True
