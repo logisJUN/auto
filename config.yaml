@@ -416,6 +416,15 @@ trade_management:
   # ErrCode 110132 regional restriction) -- effectively "stop trying this
   # symbol for the rest of the session" rather than retrying every rescan.
   permanent_error_backoff_min: 1440
+  # Once the SAME symbol hits sl_tp_attach_failed this many times in a row,
+  # escalate its backoff from sl_tp_fail_backoff_min (60min) to the long
+  # permanent_error_backoff_min tier instead. Observed live: PUMPFUNUSDT
+  # failed to attach SL/TP four separate times in one session, ~60-90min
+  # apart (retrying every time its backoff expired) -- each attempt forced
+  # a safety-close and paid a round-trip fee with zero chance of ever
+  # succeeding, since a single symbol repeatedly failing the same way points
+  # at a persistent, symbol-specific problem, not bad timing.
+  sl_tp_repeat_fail_threshold: 2
 
   # Range/mean-reversion scalp entries, only tried when the trend signal
   # (technical+news+polymarket) is neutral. Enter long near the recent range

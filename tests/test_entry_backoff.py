@@ -171,3 +171,50 @@ def test_sl_tp_attach_failure_records_backoff(tmp_path):
     assert backoff is not None
     remaining_min = (backoff["until_ts"] - time.time()) / 60
     assert 59 < remaining_min <= 60
+
+
+def test_sl_tp_attach_failure_escalates_to_the_long_tier_on_repeat(tmp_path):
+    """A symbol whose SL/TP attach keeps failing the same way (not just bad
+    timing once) shouldn't keep retrying and paying a round-trip fee on the
+    forced safety-close every hour forever -- observed live: PUMPFUNUSDT
+    failed 4 separate times, ~60-90min apart, each one a wasted fee with zero
+    chance of success.
+    """
+    from bot.exchange.bybit_client import BybitAPIError as _BAE
+
+    strategy, state, client = _make_strategy(tmp_path)
+    strategy.get_signal = lambda s, force=False: _signal()
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": "XUSDT", "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 0.0, "take_profit": 0.0,
+    }
+    client.update_trading_stop.side_effect = _BAE("repair failed")
+
+    strategy.try_enter("XUSDT")  # 1st failure -- still the short 60min tier
+    remaining_min_1 = (state.get_entry_backoff("XUSDT")["until_ts"] - time.time()) / 60
+    assert 59 < remaining_min_1 <= 60
+
+    state.set_entry_backoff("XUSDT", until_ts=time.time() - 1, reason="expired")  # simulate the wait
+    strategy.try_enter("XUSDT")  # 2nd consecutive failure -- escalates
+
+    backoff = state.get_entry_backoff("XUSDT")
+    remaining_min_2 = (backoff["until_ts"] - time.time()) / 60
+    assert 1439 < remaining_min_2 <= 1440
+    assert "x2" in backoff["reason"]
+
+
+def test_sl_tp_failure_streak_resets_after_a_successful_entry(tmp_path):
+    strategy, state, client = _make_strategy(tmp_path)
+    strategy.get_signal = lambda s, force=False: _signal()
+    state.record_sl_tp_failure("XUSDT")  # simulate one prior failure
+
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": "XUSDT", "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
+    }
+
+    strategy.try_enter("XUSDT")  # succeeds this time
+
+    assert state.get_sl_tp_failures("XUSDT") == 0

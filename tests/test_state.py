@@ -160,3 +160,24 @@ def test_consecutive_losses_tracked_independently_per_symbol(tmp_path):
 
     assert state.get_consecutive_losses("AUSDT") == 2
     assert state.get_consecutive_losses("BUSDT") == 1
+
+
+def test_sl_tp_failure_roundtrip(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    assert state.get_sl_tp_failures("XUSDT") == 0
+
+    assert state.record_sl_tp_failure("XUSDT") == 1
+    assert state.record_sl_tp_failure("XUSDT") == 2
+    assert state.get_sl_tp_failures("XUSDT") == 2
+
+
+def test_clear_sl_tp_failures(tmp_path):
+    state = StateStore(str(tmp_path / "state.json"))
+    state.record_sl_tp_failure("XUSDT")
+    state.record_sl_tp_failure("XUSDT")
+
+    state.clear_sl_tp_failures("XUSDT")
+
+    assert state.get_sl_tp_failures("XUSDT") == 0
+    # clearing something never set is a harmless no-op
+    state.clear_sl_tp_failures("YUSDT")

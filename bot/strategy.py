@@ -559,8 +559,22 @@ class Strategy:
                 logger.critical("COULD NOT CLOSE UNPROTECTED POSITION %s -- MANUAL ACTION REQUIRED: %s", symbol, exc)
             self.notifier.send(f"[긴급] {symbol} SL/TP 설정 실패 - 긴급 청산 시도했습니다. Bybit 앱에서 직접 확인하세요.")
             log_decision(self.log_dir, {"event": "sl_tp_attach_failed", "symbol": symbol})
-            backoff_min = self.trade_cfg.get("sl_tp_fail_backoff_min", 60)
-            self.state.set_entry_backoff(symbol, time.time() + backoff_min * 60, reason="sl_tp_attach_failed")
+            # A single failure can be a transient exchange hiccup -- but the
+            # standard 60min backoff meant a symbol with a PERSISTENT problem
+            # (bad tick/qty precision, an instrument-specific restriction)
+            # just kept retrying and failing every hour indefinitely, paying
+            # a round-trip fee (the forced safety-close above) on every
+            # attempt with zero chance of ever succeeding. Escalate to the
+            # long permanent-error tier once the same symbol fails repeatedly.
+            failures = self.state.record_sl_tp_failure(symbol)
+            fail_threshold = self.trade_cfg.get("sl_tp_repeat_fail_threshold", 2)
+            if failures >= fail_threshold:
+                backoff_min = self.trade_cfg.get("permanent_error_backoff_min", 1440)
+                reason = f"sl_tp_attach_failed x{failures}"
+            else:
+                backoff_min = self.trade_cfg.get("sl_tp_fail_backoff_min", 60)
+                reason = "sl_tp_attach_failed"
+            self.state.set_entry_backoff(symbol, time.time() + backoff_min * 60, reason=reason)
             return
 
         trade = stop_manager.new_trade(symbol, side, entry_price, qty, atr, trade_cfg)
@@ -570,6 +584,7 @@ class Strategy:
         trade.update(extra_trade_fields)
         self.state.set_trade(symbol, trade)
         self.state.clear_skip_reason(symbol)
+        self.state.clear_sl_tp_failures(symbol)
 
         msg = (f"[진입{msg_tag}] {symbol} {side.upper()} qty={qty} entry~{entry_price:.4f} "
                f"SL={sl_price:.4f} TP={tp_price:.4f} lev={leverage}x")

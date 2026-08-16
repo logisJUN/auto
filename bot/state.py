@@ -28,6 +28,7 @@ def default_state() -> dict:
         "entry_backoffs": {},   # symbol -> {"until_ts": ..., "reason": ...}
         "skip_reasons": {},     # symbol -> {"reason": ..., "ts": ...} -- last try_enter() skip
         "consecutive_losses": {},  # symbol -> current losing streak (reset to 0 on a win)
+        "sl_tp_failures": {},   # symbol -> consecutive SL/TP-attach failure count (reset on a success)
     }
 
 
@@ -152,6 +153,27 @@ class StateStore:
 
     def get_consecutive_losses(self, symbol: str) -> int:
         return self._state.get("consecutive_losses", {}).get(symbol, 0)
+
+    # -- per-symbol SL/TP-attach failure streak ---------------------------------------------------------
+    def record_sl_tp_failure(self, symbol: str) -> int:
+        """Tracks consecutive SL/TP-attach failures for `symbol` (see
+        Strategy._open's use of this to escalate the entry backoff after
+        repeat failures). A single failure can be a transient exchange
+        hiccup, but repeated failures on the same symbol point at a
+        persistent, symbol-specific problem -- not worth retrying (and
+        paying a round-trip fee on the forced safety-close) every hour
+        forever. Reset to 0 by clear_sl_tp_failures on the next success.
+        """
+        self._state["sl_tp_failures"][symbol] = self._state["sl_tp_failures"].get(symbol, 0) + 1
+        self.save()
+        return self._state["sl_tp_failures"][symbol]
+
+    def clear_sl_tp_failures(self, symbol: str):
+        self._state.get("sl_tp_failures", {}).pop(symbol, None)
+        self.save()
+
+    def get_sl_tp_failures(self, symbol: str) -> int:
+        return self._state.get("sl_tp_failures", {}).get(symbol, 0)
 
     # -- stale-exit re-entry cooldown ---------------------------------------------------------
     def set_stale_cooldown(self, symbol: str, side: str, until_ts: float):
