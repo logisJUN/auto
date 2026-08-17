@@ -224,10 +224,18 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
     # chase_caution_atr_mult check) can carry its own tighter override on the
     # trade dict instead of the global default, so that specific trade gets
     # flagged as underwater sooner -- can't predict it'll reverse, but can
-    # react faster if it does.
-    adverse_start_rr = trade.get("adverse_tighten_start_rr_override") or cfg.get("adverse_tighten_start_rr", 0.0)
-    if adverse_start_rr and cur_profit_r <= -abs(adverse_start_rr) and \
-            _signal_no_longer_supports(side, agg_signal, cfg):
+    # react faster if it does. Such a trade also skips the "signal must have
+    # faded" requirement below: it was already flagged as lower-conviction at
+    # entry, so waiting for a SECOND confirmation (the live signal visibly
+    # weakening, which lags a fast snap-back reversal) partly defeats the
+    # point of giving it a tighter trigger in the first place. Observed live:
+    # a chase-flagged WLDUSDT trade (Ext=+2.9xATR) rode all the way to its
+    # full initial SL with no adverse_tighten ever firing, because the cached
+    # signal never visibly flipped before the SL was hit.
+    override_rr = trade.get("adverse_tighten_start_rr_override")
+    adverse_start_rr = override_rr or cfg.get("adverse_tighten_start_rr", 0.0)
+    signal_condition = True if override_rr is not None else _signal_no_longer_supports(side, agg_signal, cfg)
+    if adverse_start_rr and cur_profit_r <= -abs(adverse_start_rr) and signal_condition:
         tighten_mult = cfg.get("adverse_tighten_atr_multiplier", 0.5)
         if side == "long":
             candidate_sl = current_price - atr * tighten_mult

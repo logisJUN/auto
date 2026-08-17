@@ -255,3 +255,36 @@ def test_adverse_tighten_without_override_ignores_the_shallower_drawdown():
     result = stop_manager.update_trailing_and_tp(trade, 99.1, atr=2, agg_signal=faded_signal, cfg=ADVERSE_CFG)
 
     assert not result["sl_changed"]
+
+
+def test_adverse_tighten_override_fires_even_if_the_signal_still_looks_supportive():
+    """The whole point of the override: a chase-flagged trade was already
+    distrusted at entry, so it shouldn't need a SECOND confirmation (the live
+    signal visibly weakening) before tightening -- that lags a fast snap-back
+    reversal. Observed live: a chase-flagged WLDUSDT trade rode to its full
+    initial SL with no adverse_tighten ever firing because the cached signal
+    never visibly flipped in time.
+    """
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    trade["adverse_tighten_start_rr_override"] = 0.25
+    # price at 99.1 -> profit_r = -0.30, past the 0.25 override
+    strong_supportive_signal = {"direction": "long", "score": 0.9, "confidence": 0.9}
+    result = stop_manager.update_trailing_and_tp(trade, 99.1, atr=2, agg_signal=strong_supportive_signal,
+                                                  cfg=ADVERSE_CFG)
+
+    assert result["sl_changed"]
+    assert "adverse_tighten" in result["reason"]
+
+
+def test_adverse_tighten_without_override_still_requires_a_faded_signal():
+    """Non-chase-flagged trades are unaffected by the override bypass -- they
+    still need BOTH the RR threshold and a visibly weakened signal, same as
+    before.
+    """
+    trade = stop_manager.new_trade("BTCUSDT", "long", entry_price=100, qty=1, atr=2, cfg=ADVERSE_CFG)
+    # no override on this trade; price well past the global 0.5 threshold
+    strong_supportive_signal = {"direction": "long", "score": 0.9, "confidence": 0.9}
+    result = stop_manager.update_trailing_and_tp(trade, 98.3, atr=2, agg_signal=strong_supportive_signal,
+                                                  cfg=ADVERSE_CFG)
+
+    assert not result["sl_changed"]
