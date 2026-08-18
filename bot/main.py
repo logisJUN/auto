@@ -7,6 +7,7 @@ as a systemd service on a small always-on VPS -- see deploy/ and README.md.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from bot.config import load_config
@@ -19,7 +20,7 @@ from bot.strategy import Strategy
 
 def main():
     cfg = load_config()
-    log_dir = setup_logging()
+    log_dir = setup_logging(os.getenv("LOG_DIR", "logs"))
     logger = logging.getLogger("bot.main")
 
     client = BybitClient(
@@ -28,7 +29,7 @@ def main():
         testnet=cfg.secrets.bybit_testnet,
         category=cfg.get("exchange", "category", default="linear"),
     )
-    state = StateStore("data/state.json")
+    state = StateStore(os.path.join(os.getenv("DATA_DIR", "data"), "state.json"))
     notifier = Notifier(cfg.secrets.telegram_bot_token, cfg.secrets.telegram_chat_id)
     strategy = Strategy(client, cfg, state, notifier, str(log_dir))
 

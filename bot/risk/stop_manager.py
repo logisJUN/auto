@@ -33,9 +33,12 @@ def new_trade(symbol: str, side: str, entry_price: float, qty: float, atr: float
         "current_sl": sl,
         "current_tp": tp,
         "risk_distance": risk_distance,
+        "entry_atr": atr,
         "breakeven_moved": False,
         "trailing_active": False,
         "tp_extensions_used": 0,
+        "partial_tp_taken": False,
+        "partial_realized_pnl": 0.0,
         "opened_at": time.time(),
     }
 
@@ -65,9 +68,19 @@ class FlashMoveTracker:
         return (latest_price - oldest_price) / oldest_price * 100.0
 
 
-def check_flash_move(tracker: FlashMoveTracker, symbol: str, side: str, cfg: dict) -> bool:
-    """True if price has moved against the position by >= flash_move_pct within the window."""
-    threshold = cfg.get("flash_move_pct", 1.2)
+def check_flash_move(tracker: FlashMoveTracker, symbol: str, side: str, cfg: dict, entry_atr_pct: float) -> bool:
+    """True if price has moved against the position by more than a threshold
+    within the window. The threshold scales with the position's own entry-time
+    ATR (as a % of entry price) instead of being one fixed % for every symbol --
+    a fixed % is either too loose for a volatile symbol (it can drift a long way
+    before a fixed threshold ever fires) or too twitchy for a calm one.
+    `entry_atr_pct` is entry_atr / entry_price * 100, computed by the caller.
+    """
+    mult = cfg.get("flash_move_atr_mult", 1.0)
+    min_pct = cfg.get("flash_move_min_pct", 0.8)
+    max_pct = cfg.get("flash_move_max_pct", 3.0)
+    threshold = max(min_pct, min(max_pct, entry_atr_pct * mult))
+
     move = tracker.pct_move(symbol)
     if side == "long" and move <= -threshold:
         return True
@@ -89,7 +102,37 @@ def check_signal_reversal(trade: dict, agg_signal: dict, cfg: dict) -> bool:
     return False
 
 
-def _profit_r(trade: dict, current_price: float) -> float:
+def check_stale_position(trade: dict, current_price: float, cfg: dict, capital_pressure: bool = True) -> bool:
+    """True if the trade has been open long enough and price has barely moved
+    from entry since (stale_exit_max_move_pct) -- i.e. it's going nowhere.
+    Applies regardless of whether the trade is currently up or down, so a
+    stuck position gives up its slot for a fresh signal elsewhere instead of
+    sitting there indefinitely.
+
+    Closing a truly flat position is a guaranteed small loss from round-trip
+    fees alone, worth paying only if that capital is actually needed. When
+    `capital_pressure` is False (there's free margin/slots -- nothing is
+    waiting on this one), the timeout is relaxed to stale_exit_after_min_no_pressure
+    instead of the normal stale_exit_after_min, so a flat position gets more
+    patience when there's no rush to recycle it.
+    """
+    timeout_min = cfg.get("stale_exit_after_min", 0)
+    if timeout_min <= 0:
+        return False
+    if not capital_pressure:
+        timeout_min = cfg.get("stale_exit_after_min_no_pressure", timeout_min * 4)
+    if time.time() - trade["opened_at"] < timeout_min * 60:
+        return False
+
+    entry = trade["entry_price"]
+    if entry <= 0:
+        return False
+    max_move_pct = cfg.get("stale_exit_max_move_pct", 0.5)
+    moved_pct = abs(current_price - entry) / entry * 100.0
+    return moved_pct <= max_move_pct
+
+
+def profit_r(trade: dict, current_price: float) -> float:
     r = trade["risk_distance"]
     if r <= 0:
         return 0.0
@@ -98,27 +141,57 @@ def _profit_r(trade: dict, current_price: float) -> float:
     return (trade["entry_price"] - current_price) / r
 
 
+def _signal_no_longer_supports(side: str, agg_signal: dict, cfg: dict) -> bool:
+    """True if the signal that justified this position no longer backs it --
+    used to gate adverse-move stop tightening, so a losing-but-still-intact
+    trade isn't cut short just because price dipped (that's what the ATR-sized
+    initial SL is already for). Deliberately a softer bar than
+    check_signal_reversal (which requires a strong flip and forces a full
+    exit): fading confidence or a score drifting toward flat also counts here,
+    since the point is to cap further downside, not force an immediate exit.
+    """
+    conf_floor = cfg.get("adverse_tighten_confidence_floor", 0.5)
+    if agg_signal.get("confidence", 0.0) < conf_floor:
+        return True
+    same_direction = (side == "long" and agg_signal.get("direction") == "long") or \
+                      (side == "short" and agg_signal.get("direction") == "short")
+    if not same_direction:
+        return True
+    score_floor = cfg.get("adverse_tighten_score_floor", 0.15)
+    return abs(agg_signal.get("score", 0.0)) < score_floor
+
+
 def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_signal: dict, cfg: dict) -> dict:
     """Mutates trade's current_sl/current_tp in place (favorable direction only) and
     returns {"sl_changed": bool, "tp_changed": bool, "reason": str} for logging/API calls.
     """
     side = trade["side"]
     result = {"sl_changed": False, "tp_changed": False, "reason": ""}
-    profit_r = _profit_r(trade, current_price)
+    cur_profit_r = profit_r(trade, current_price)
     atr = max(atr, 1e-9)
 
     breakeven_rr = cfg.get("breakeven_after_rr", 0.5)
-    if not trade["breakeven_moved"] and profit_r >= breakeven_rr:
+    if not trade["breakeven_moved"] and cur_profit_r >= breakeven_rr:
+        # A stop placed exactly at entry gets clipped by ordinary noise -- price
+        # revisiting its own entry level is common even mid-trend, so an
+        # unbuffered breakeven stop tends to whipsaw out on noise rather than a
+        # real reversal. Offsetting it slightly past entry (in the favorable
+        # direction, scaled by ATR) both requires a real move to trigger and
+        # turns the "breakeven" stop into a small locked-in win instead of a
+        # small loss (net of fees) when it does.
+        buffer_mult = cfg.get("breakeven_buffer_atr_mult", 0.2)
         entry = trade["entry_price"]
-        improves = (side == "long" and entry > trade["current_sl"]) or (side == "short" and entry < trade["current_sl"])
+        breakeven_sl = entry + atr * buffer_mult if side == "long" else entry - atr * buffer_mult
+        improves = (side == "long" and breakeven_sl > trade["current_sl"]) or \
+                   (side == "short" and breakeven_sl < trade["current_sl"])
         if improves:
-            trade["current_sl"] = entry
+            trade["current_sl"] = breakeven_sl
             trade["breakeven_moved"] = True
             result["sl_changed"] = True
             result["reason"] += "breakeven;"
 
     trail_rr = cfg.get("trail_activation_rr", 1.0)
-    if profit_r >= trail_rr:
+    if cur_profit_r >= trail_rr:
         trade["trailing_active"] = True
         trail_mult = cfg.get("trail_atr_multiplier", 1.2)
         if side == "long":
@@ -133,6 +206,49 @@ def update_trailing_and_tp(trade: dict, current_price: float, atr: float, agg_si
                 trade["current_sl"] = candidate_sl
                 result["sl_changed"] = True
                 result["reason"] += "trail;"
+
+    # Adverse-move stop tightening: the mirror image of breakeven/trailing above,
+    # which only ever protect a position once it's WINNING. A losing position
+    # currently rides its full initial SL distance no matter what -- even once
+    # the very reasoning that justified holding through the drawdown has
+    # stopped supporting it (confidence faded, or the signal flipped outright).
+    # Observed live: a fixed win rate (~44%) with continued net equity erosion
+    # points at losing trades costing more than winners gain, not a bad hit
+    # rate -- cutting the *size* of losses once the thesis is no longer intact
+    # is the direct lever on that, without touching entries at all.
+    #
+    # Only tightens (never loosens, same invariant as trailing) and only once
+    # the position is underwater by at least adverse_tighten_start_rr -- a
+    # normal early drawdown on an otherwise-intact signal is not touched.
+    # A trade entered already somewhat extended (see strategy._enter_trend's
+    # chase_caution_atr_mult check) can carry its own tighter override on the
+    # trade dict instead of the global default, so that specific trade gets
+    # flagged as underwater sooner -- can't predict it'll reverse, but can
+    # react faster if it does. Such a trade also skips the "signal must have
+    # faded" requirement below: it was already flagged as lower-conviction at
+    # entry, so waiting for a SECOND confirmation (the live signal visibly
+    # weakening, which lags a fast snap-back reversal) partly defeats the
+    # point of giving it a tighter trigger in the first place. Observed live:
+    # a chase-flagged WLDUSDT trade (Ext=+2.9xATR) rode all the way to its
+    # full initial SL with no adverse_tighten ever firing, because the cached
+    # signal never visibly flipped before the SL was hit.
+    override_rr = trade.get("adverse_tighten_start_rr_override")
+    adverse_start_rr = override_rr or cfg.get("adverse_tighten_start_rr", 0.0)
+    signal_condition = True if override_rr is not None else _signal_no_longer_supports(side, agg_signal, cfg)
+    if adverse_start_rr and cur_profit_r <= -abs(adverse_start_rr) and signal_condition:
+        tighten_mult = cfg.get("adverse_tighten_atr_multiplier", 0.5)
+        if side == "long":
+            candidate_sl = current_price - atr * tighten_mult
+            if candidate_sl > trade["current_sl"]:
+                trade["current_sl"] = candidate_sl
+                result["sl_changed"] = True
+                result["reason"] += "adverse_tighten;"
+        else:
+            candidate_sl = current_price + atr * tighten_mult
+            if candidate_sl < trade["current_sl"]:
+                trade["current_sl"] = candidate_sl
+                result["sl_changed"] = True
+                result["reason"] += "adverse_tighten;"
 
     # extend TP if price has approached it but signals still strongly favor continuation
     remaining = abs(trade["current_tp"] - current_price)

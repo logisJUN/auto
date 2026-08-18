@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: bybit-bot
+    runtime: python
+    # Free plan has no persistent disk: data/state.json and logs/ reset on
+    # every sleep+wake or redeploy. An external uptime pinger (e.g.
+    # UptimeRobot hitting /healthz every <15min) is required to keep this
+    # from sleeping; see README.md for the trade-offs of this setup versus
+    # a paid plan with a disk.
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: BYBIT_TESTNET
+        sync: false
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DASHBOARD_TOKEN
+        sync: false
+      - key: EMAIL_SMTP_HOST
+        sync: false
+      - key: EMAIL_SMTP_PORT
+        value: "465"
+      - key: EMAIL_SMTP_USER
+        sync: false
+      - key: EMAIL_SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_TO
+        sync: false

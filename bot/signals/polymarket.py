@@ -83,6 +83,13 @@ class PolymarketSignal:
         self.keywords = [k.lower() for k in cfg.get("keywords", [])]
         self.refresh_seconds = cfg.get("refresh_minutes", 15) * 60
         self.max_markets = cfg.get("max_markets", 40)
+        # Polymarket's markets here are broad crypto/macro questions (bitcoin,
+        # Fed rate, recession...), not per-altcoin -- applying that as if it
+        # were relevant to every scanned altcoin let unrelated macro sentiment
+        # push a low-cap alt's direction. Only give real confidence for
+        # symbols this signal is actually about; default to the majors its
+        # own keywords name.
+        self.relevant_symbols = set(cfg.get("relevant_symbols", ["BTCUSDT", "ETHUSDT"]))
         self._cache_time = 0.0
         self._relevant: list[dict] = []
         self._prev_prices: dict[str, float] = {}
@@ -119,8 +126,11 @@ class PolymarketSignal:
         self._cache_time = now
         logger.info("polymarket refreshed: %d relevant markets", len(self._relevant))
 
-    def score(self) -> dict:
+    def score(self, symbol: str) -> dict:
         self._refresh_if_needed()
+        if symbol not in self.relevant_symbols:
+            return {"score": 0.0, "confidence": 0.0, "market_count": len(self._relevant), "sample": []}
+
         directional = [m for m in self._relevant if m["polarity"] != 0]
         if not directional:
             return {"score": 0.0, "confidence": 0.0, "market_count": len(self._relevant), "sample": []}

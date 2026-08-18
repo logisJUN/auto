@@ -95,8 +95,27 @@ def score_timeframe(candles: list[dict], cfg: dict) -> dict:
     }
 
 
-def volume_score(candles: list[dict], lookback: int = 20) -> float:
-    """Relative volume + whether recent volume is confirming the price direction."""
+def range_levels(candles: list[dict], lookback: int = 20) -> dict:
+    """Rolling high/low over the last `lookback` candles, used to spot a trading
+    range for mean-reversion entries when the trend signal is neutral.
+    """
+    df = to_dataframe(candles)
+    if len(df) < lookback:
+        return {"range_high": 0.0, "range_low": 0.0}
+    recent = df.tail(lookback)
+    return {"range_high": float(recent["high"].max()), "range_low": float(recent["low"].min())}
+
+
+def volume_score(candles: list[dict], lookback: int = 20, direction_lookback: int = 3) -> float:
+    """Relative volume + whether recent price action is confirming the direction.
+
+    Direction is measured over the last `direction_lookback` candles, not just
+    the most recent one -- a single candle (e.g. a brief pullback wick within
+    an ongoing uptrend, often exactly where a volume spike shows up) shouldn't
+    be able to swing this component hard against the actual multi-candle
+    direction. Observed live: a lone red 15m candle with above-average volume
+    scored strongly bearish mid-uptrend, reinforcing a wrong short call.
+    """
     df = to_dataframe(candles)
     if len(df) < lookback + 2:
         return 0.0
@@ -105,28 +124,55 @@ def volume_score(candles: list[dict], lookback: int = 20) -> float:
     last_vol = recent["volume"].iloc[-1]
     rel_vol = _clip((last_vol / avg_vol - 1.0), -1.0, 2.0)  # can exceed 1 on spikes
 
-    price_change = recent["close"].iloc[-1] - recent["close"].iloc[-2]
+    span = max(1, min(direction_lookback, len(recent) - 1))
+    price_change = recent["close"].iloc[-1] - recent["close"].iloc[-1 - span]
     direction = 1.0 if price_change > 0 else (-1.0 if price_change < 0 else 0.0)
 
     # volume alone isn't directional -- it amplifies whatever direction price just moved.
     return _clip(direction * min(abs(rel_vol), 1.5) * 0.66)
 
 
+def recent_extension(candles: list[dict], atr: float, lookback: int = 6) -> float:
+    """Signed price move over the last `lookback` candles, in units of ATR --
+    positive means price has already extended upward recently, negative means
+    downward. Used to catch a "chase" entry: every existing sub-score above
+    (trend/momentum/macd/bollinger, plus volume_score) reads a big, fast
+    recent move as strong directional confirmation, with no way to tell a
+    fresh breakout apart from a spike that's already exhausted and due to
+    pull back. Observed live repeatedly: a long entered a few candles after a
+    single huge green candle, right near the local top, then drifting down.
+    """
+    df = to_dataframe(candles)
+    if len(df) < lookback + 1 or atr <= 0:
+        return 0.0
+    recent = df.tail(lookback + 1)
+    return float((recent["close"].iloc[-1] - recent["close"].iloc[0]) / atr)
+
+
 def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[str], cfg: dict) -> dict:
     """Combines per-timeframe scores, weighting longer timeframes more (trend filter).
+
+    The step between consecutive timeframes' weight is `timeframe_weight_step`
+    (default 1.0, i.e. weights 1, 2, 3 for 3 timeframes -- the original
+    behavior). A slow-moving higher timeframe (e.g. EMA12/26 on 4h candles is
+    a 2-4 day lookback) lags a genuine fresh trend reversal by design, so
+    weighting it 3x a fast one can keep the blended score reading the *old*
+    direction well after price has already turned. Lowering the step flattens
+    that gap so a newer shift on faster timeframes isn't drowned out as hard.
 
     Returns {score, atr (from the shortest/execution timeframe), per_tf: {...}}.
     """
     per_tf = {}
     weighted_sum = 0.0
     weight_total = 0.0
+    weight_step = cfg.get("timeframe_weight_step", 1.0)
     for i, tf in enumerate(timeframes):
         candles = klines_by_tf.get(tf, [])
         if not candles:
             continue
         result = score_timeframe(candles, cfg)
         per_tf[tf] = result
-        weight = i + 1  # later (longer) timeframes weigh more
+        weight = 1.0 + i * weight_step  # later (longer) timeframes weigh more
         weighted_sum += result["score"] * weight
         weight_total += weight
 
@@ -135,12 +181,20 @@ def multi_timeframe_score(klines_by_tf: dict[str, list[dict]], timeframes: list[
     exec_atr = per_tf.get(exec_tf, {}).get("atr", 0.0) if exec_tf else 0.0
     exec_close = per_tf.get(exec_tf, {}).get("close", 0.0) if exec_tf else 0.0
 
-    vol_score = volume_score(klines_by_tf.get(exec_tf, [])) if exec_tf else 0.0
+    vol_score = volume_score(klines_by_tf.get(exec_tf, []),
+                              direction_lookback=cfg.get("volume_direction_lookback", 3)) if exec_tf else 0.0
+    range_info = range_levels(klines_by_tf.get(exec_tf, []), cfg.get("range_lookback", 20)) if exec_tf else \
+        {"range_high": 0.0, "range_low": 0.0}
+    extension = recent_extension(klines_by_tf.get(exec_tf, []), exec_atr,
+                                  cfg.get("chase_lookback_candles", 6)) if exec_tf else 0.0
 
     return {
         "score": _clip(combined),
         "atr": exec_atr,
         "close": exec_close,
         "volume_score": vol_score,
+        "range_high": range_info["range_high"],
+        "range_low": range_info["range_low"],
+        "recent_extension_atr_mult": extension,
         "per_tf": per_tf,
     }

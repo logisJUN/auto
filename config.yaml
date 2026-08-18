@@ -5,30 +5,227 @@
 
 exchange:
   category: "linear"          # USDT perpetual futures
-  symbols: ["BTCUSDT", "ETHUSDT", "SOXLUSDT", "SOLUSDT"]
+  # Always-watched symbols, regardless of the dynamic universe scan below.
+  symbols: ["BTCUSDT", "ETHUSDT"]
+  # Instead of (or in addition to) a hand-picked symbol list, periodically scan
+  # every Bybit USDT linear perpetual and watch whichever ones currently have
+  # the highest 24h turnover (liquidity) -- one cheap bulk ticker call, not a
+  # kline fetch per candidate. A position that's open when its symbol falls out
+  # of the refreshed list keeps being managed (SL/TP/trailing/stale-timeout)
+  # until it closes -- it's just not eligible for new entries anymore.
+  universe:
+    # re-enabled: staying pinned to just BTC/ETH repeatedly exposed the bot to
+    # the same wrong-direction (short) signal through a sustained correlated
+    # uptrend with no other symbol to diversify into -- the one trade outside
+    # BTC/ETH that day (SOXLUSDT, an already-open position from before the
+    # pin) was the day's best performer.
+    enabled: true
+    # Narrowed from 30: still diversified across multiple symbols (avoids the
+    # earlier BTC/ETH-only correlated-exposure problem above), but restricted
+    # to the higher-liquidity end of the turnover ranking -- less exposure to
+    # thinner alts prone to idiosyncratic single-catalyst moves the
+    # technical/volume-only signal (news/polymarket are zeroed for non-major
+    # symbols) has no way to see coming.
+    top_n: 15
+    rescan_interval_hours: 1
+    # some newly-listed/lower-liquidity perpetuals charge double the standard
+    # ~0.055% taker fee -- exclude anything above this rate regardless of how
+    # much turnover it has (a structural drag on every round trip). Symbols
+    # filtered out are backfilled from the next-highest-turnover candidates.
+    max_taker_fee_rate: 0.0006
+    # Bybit's linear-USDT list also includes tokenized stocks/ETFs/commodities
+    # alongside real crypto (e.g. SOXLUSDT is a 3x-leveraged semiconductor ETF
+    # token, SKHYNIXUSDT a tokenized Hynix stock, XAUTUSDT gold) -- these ride
+    # entirely different drivers than the technical/news/funding signals here
+    # assume, and can carry account/region restrictions a real crypto pair
+    # wouldn't (observed live: SKHYNIXUSDT rejected with ErrCode 110132).
+    # Backfilled from the next-highest-turnover candidate just like a
+    # fee-filtered symbol. Add to this list as new offenders turn up.
+    excluded_symbols: ["SOXLUSDT", "SKHYNIXUSDT", "SKHYUSDT", "XAUTUSDT", "XAUUSDT", "TSLAUSDT",
+                       "CLUSDT", "XAGUSDT", "SPCXUSDT", "SNDKUSDT", "SNXXUSDT"]
+    # SNXXUSDT specifically: its realized pnl on closed trades has run ~3x
+    # what entry/exit price times qty times leverage implies (one trade moved
+    # +2.4% in price but closed +48% in pnl on a ~7x position) -- consistent
+    # with an embedded-leverage tokenized product (like SOXLUSDT above) rather
+    # than a plain 1:1 coin, which would also explain its earlier wildly
+    # erratic record (0-for-5 losses, then two enormous wins).
+    # Systematic backstop for the same tokenized-stock/commodity problem above,
+    # instead of only reacting one ticker at a time as each new lookalike shows
+    # up live (SKHYNIXUSDT and a second ticker for the very same underlying,
+    # SKHYUSDT, both had to be caught this way). Real crypto perpetuals on
+    # Bybit are almost always offered at 12.5x+ even for lower-liquidity alts,
+    # while these CFD-style stock/commodity contracts are typically capped much
+    # lower -- a candidate symbol whose own exchange-reported max leverage
+    # falls below this floor is skipped, same as a fee-filtered one. Kept
+    # conservative (10x) to minimize the risk of dropping a legitimate
+    # low-liquidity altcoin; does not replace excluded_symbols above, which
+    # still short-circuits a known bad symbol without an extra API call. null
+    # disables this check.
+    min_max_leverage: 10.0
 
 risk:
-  # % of account equity you are willing to lose if SL is hit, per trade.
-  risk_per_trade_pct: 1.5
+  # margin allocated per position, as % of account equity. Position notional =
+  # equity * position_size_pct_of_equity / 100 * leverage.
+  # NOTE: unlike a risk-per-trade-% scheme, the loss if SL is hit is NOT fixed to
+  # a set % of equity here -- it depends on leverage and stop-loss distance.
+  # At 30% + a 10% margin_buffer_pct reserve, up to 3 positions can be sized
+  # concurrently with 10% always left as slack for fees/exchange-side margin
+  # requirements. Lowered from 45%: at the account's current (much smaller)
+  # equity, 45% per position meant a single stopped-out trade took an outsized
+  # bite out of total capital -- shrinking the per-trade bet size directly
+  # slows the rate equity can erode while win-rate/R:R fixes take effect.
+  position_size_pct_of_equity: 30.0
+  # always keep at least this % of equity as an unused margin reserve. A new
+  # position's margin is capped to min(position_size_pct_of_equity% of equity,
+  # remaining headroom under this reserve) -- so it's sized down (or skipped)
+  # instead of the exchange rejecting the order for insufficient available
+  # balance once other positions have already committed margin (ErrCode 110007,
+  # observed live with margin_buffer_pct at 0).
+  margin_buffer_pct: 10.0
+  # if every slot is full (or margin headroom is gone) but a NEW trend signal on
+  # some other symbol comes in strong, close the weakest currently-held position
+  # and take that trade instead of just sitting out. "Weakest" = lowest current
+  # (not entry-time) confidence in its own direction; a position whose signal has
+  # faded to neutral or reversed scores lowest and is replaced first.
+  override_entry:
+    enabled: true
+    # the new candidate must have at least this much confidence to be allowed
+    # to displace an existing position at all.
+    min_confidence: 0.85
+    # ...and must beat the weakest held position's current confidence by at
+    # least this much (not just be marginally better).
+    min_confidence_margin_over_weakest: 0.15
+    # Biases which open position gets displaced toward one on an
+    # over-represented side (e.g. a 3rd short among 3 shorts), rather than
+    # picking purely by confidence with no regard for directional diversity --
+    # otherwise a "diversifying" swap could leave the portfolio just as skewed.
+    # Scales with (count on that side - 1); 0 disables the bias entirely.
+    override_diversity_bonus: 0.1
+  # Hard cap: never hold more than this many positions on the same side at
+  # once, regardless of signal strength -- observed live as BTC/ETH both stuck
+  # short through a sustained uptrend, each new signal confidently (but
+  # wrongly) re-confirming the same directional bet. 0 disables this check.
+  max_concurrent_positions_per_direction: 2
+  # Each position already open on a side raises the confidence bar for another
+  # one on that same side by this much -- a bigger pile-up needs a
+  # correspondingly more convincing signal, not just "still says short". 0
+  # disables (flat min_confidence_to_enter regardless of current skew).
+  same_direction_confidence_step: 0.05
   # hard cap on leverage the bot will ever request, regardless of signal confidence.
+  # only used as a fallback if default_leverage_range below is missing entirely.
   max_leverage: 5
-  # bot stops opening new trades for the day once realized loss hits this % of
+  # per-symbol leverage range [min, max]. Actual leverage used for a trade is
+  # interpolated within this range based on signal confidence (low confidence ->
+  # min, high confidence -> max), then capped by the exchange's own max leverage
+  # for that symbol/margin tier.
+  # Trimmed max from 15 -> 13: a day's data showed the 0.60-0.70 confidence
+  # bucket (3 trades) carrying most of the day's profit while the single
+  # 0.70-0.80 trade -- which would've used more leverage -- barely made
+  # anything despite winning. Small sample, not conclusive, but the pattern
+  # (higher confidence/leverage not translating into proportionally more
+  # profit) argues for capping the upside amplification rather than trusting
+  # it further.
+  leverage_by_symbol:
+    BTCUSDT: {min: 10, max: 13}
+    ETHUSDT: {min: 10, max: 13}
+  # leverage range for any symbol NOT listed in leverage_by_symbol above -- i.e.
+  # everything picked up by the dynamic universe scan.
+  default_leverage_range: {min: 5, max: 8}
+  # bot stops opening new trades for the day (and force-flattens whatever's
+  # still open, see tick()'s daily_breach handling) once loss hits this % of
   # the equity it had at the start of the day (UTC).
   max_daily_loss_pct: 8.0
+  # Graduated de-risking instead of a hard binary stop: once today's loss
+  # crosses this softer threshold, new entries still happen but smaller
+  # (daily_loss_derisk_size_mult) and more selective
+  # (daily_loss_derisk_confidence_add added on top of min_confidence_to_enter)
+  # instead of trading fully normally right up until max_daily_loss_pct trips
+  # and the whole rest of the day's opportunity is given up in one step.
+  # Tightens progressively as losses accumulate rather than an all-or-nothing
+  # switch. 0 disables (pure binary stop, same as before this existed).
+  daily_loss_derisk_pct: 5.0
+  daily_loss_derisk_size_mult: 0.5
+  daily_loss_derisk_confidence_add: 0.1
+  # Skip an entry entirely if a full SL hit on it alone would cost more than
+  # this % of current equity -- (margin/equity) * leverage * sl_distance_pct.
+  # Catches the case a margin/leverage cap alone doesn't: a wide ATR-based SL
+  # distance on a volatile symbol can blow past any reasonable per-trade risk
+  # even when the margin sizing itself looks normal (observed live: KORUUSDT's
+  # own stress-test figure hit ~24% of equity from a 6.4% SL distance at 7x
+  # leverage). A single trade shouldn't alone be able to exceed the whole
+  # day's loss budget. Lowered from 8%: at the account's current (much
+  # smaller) equity, letting any single trade risk 8% on its own is too large
+  # a bite per loss given a ~44% win rate -- 4% caps the worst case for one
+  # bad trade to roughly a quarter of the whole daily loss budget. 0 disables
+  # this check.
+  max_position_risk_pct: 4.0
   # bot stops opening new trades once this many are open at the same time.
-  max_concurrent_positions: 1
+  # Lowered from 4: every entry pays a fixed ~0.11% (of notional) round-trip
+  # fee regardless of outcome, and it disproportionately eats into the small
+  # wins that breakeven/trailing tend to lock in vs. the larger losses that
+  # ride out further -- fewer concurrent slots means fewer of these
+  # fee-guaranteed round trips per day on marginal setups.
+  max_concurrent_positions: 3
   # minimum aggregated confidence (0-1) required to open a position at all.
-  min_confidence_to_enter: 0.55
+  # 0.55-0.70 trades accounted for most of a day's realized loss (7 trades,
+  # -2.88 USDT) while higher-confidence trades held up meaningfully better --
+  # raised to cut off that weak bucket. Raised again from 0.65: even with that
+  # bucket cut off, no day has closed net positive yet -- the fee drag per
+  # trade (paid on every entry regardless of outcome) means only the more
+  # convincing setups are worth paying it for.
+  min_confidence_to_enter: 0.70
+  # skip entries entirely (trend or range) when the execution-timeframe ATR is
+  # below this % of price -- a dead/chopping market where the likely move
+  # doesn't clearly clear the ~0.11% round-trip taker fee. 0 disables this check.
+  min_volatility_atr_pct: 0.15
   # minimum notional order size in quote currency (USDT). Trades smaller than
   # this are skipped rather than sent (avoids exchange min-qty rejects).
   min_order_notional_usdt: 5.0
+  # Skip a trend entry if price has already moved this many multiples of ATR
+  # (over signals.technical.chase_lookback_candles) in the SAME direction as
+  # the candidate trade -- every technical sub-score reads a big, fast recent
+  # move as strong confirmation, with no way to tell a fresh breakout apart
+  # from an already-exhausted spike. Observed live repeatedly (SOLUSDT,
+  # XAUUSDT, SNXXUSDT's 0-for-5 record): longs entered a few candles after a
+  # single huge green candle, right near the local top, then drifting down --
+  # and the trend-following bucket overall (34% win rate) underperforming
+  # simple range/mean-reversion scalps (46%) despite the higher confidence
+  # bar, which points at entry timing (chasing exhaustion, not catching a
+  # fresh move) rather than the directional call itself. 0 disables this.
+  max_entry_chase_atr_mult: 3.0
+  # Below max_entry_chase_atr_mult (which blocks the entry outright), this
+  # lower threshold flags a trade that's still somewhat extended at entry --
+  # predicting whether it'll reverse isn't realistic, but reacting faster IF
+  # it does is: such a trade gets trade_management.adverse_tighten_start_rr_
+  # caution as its own tighter adverse-move-tightening trigger instead of the
+  # global default (see stop_manager.update_trailing_and_tp), so a reversal
+  # on it gets cut smaller/sooner. 0 disables (no trade ever gets the
+  # tighter override).
+  chase_caution_atr_mult: 1.5
+  # Auto-pauses a symbol whose signal keeps being wrong specifically for it,
+  # rather than only ever reacting to the account's overall daily loss.
+  # Observed live: SNXXUSDT went 0-for-5 (every single close a loss) while
+  # other symbols traded fine on the same signal logic over the same period
+  # -- a symbol-specific circuit breaker catches that pattern directly.
+  # Reuses the entry-backoff mechanism, so it shows up in the dashboard's
+  # skip-reason column like any other backoff. Resets to 0 on the next win.
+  # 0 disables this check.
+  symbol_pause_after_consecutive_losses: 3
+  symbol_pause_duration_min: 720
 
 signals:
   weights:
-    technical: 0.20
-    volume: 0.15
-    news: 0.20
-    polymarket: 0.45
+    technical: 0.50
+    volume: 0.10
+    news: 0.15
+    polymarket: 0.20
+    # contrarian crowd-positioning signal (see signals.funding below) --
+    # kept deliberately small: observed live pushing "short" through several
+    # hours of a grinding uptrend (funding stayed positive/crowded-long
+    # instead of reverting), racking up real losses fighting a trend that
+    # hadn't actually exhausted yet. Still present as a minor damper, not a
+    # primary direction-caller.
+    funding: 0.05
   technical:
     timeframes: ["15", "60", "240"]   # minutes; last one weighted heaviest (trend filter)
     rsi_period: 14
@@ -36,6 +233,26 @@ signals:
     ema_slow: 26
     atr_period: 14
     kline_limit: 200
+    # candles (on the shortest configured timeframe) used to find the recent
+    # trading-range high/low for range_trade below.
+    range_lookback: 20
+    # Step between consecutive timeframes' weight (1.0 -> weights 1,2,3 for
+    # 3 timeframes). Lowered from the 1.0 default: the 240min EMA12/26 is a
+    # 2-4 day lookback that lags a genuine fresh trend reversal, and weighing
+    # it 3x the 15min read kept the blend calling the *old* direction well
+    # after price had already turned (observed live on MUUSDT). 0.5 ->
+    # weights 1, 1.5, 2 -- still favors the higher timeframe, less extremely.
+    timeframe_weight_step: 0.5
+    # Volume score's price-direction check now looks back this many candles
+    # instead of just the last one -- a single candle (often exactly where a
+    # volume spike shows up, e.g. a pullback wick mid-uptrend) shouldn't be
+    # able to swing this component hard against the real multi-candle move.
+    volume_direction_lookback: 3
+    # candles (on the shortest configured timeframe) used to measure how far
+    # price has already moved recently, in ATR terms -- see
+    # risk.max_entry_chase_atr_mult, which is the actual entry gate; this just
+    # sets the window that figure is measured over.
+    chase_lookback_candles: 6
   news:
     feeds:
       - "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -48,36 +265,197 @@ signals:
     keywords: ["bitcoin", "ethereum", "crypto", "fed ", "interest rate", "recession"]
     refresh_minutes: 15
     max_markets: 40
+    # These markets are broad crypto/macro questions, not per-altcoin -- only
+    # give this signal real confidence for the symbols it's actually about.
+    # Everything else (universe-scanned alts) gets zero confidence from it
+    # instead of an irrelevant macro sentiment pushing its direction.
+    relevant_symbols: ["BTCUSDT", "ETHUSDT"]
+  funding:
+    # perpetual funding rate (%, per interval) treated as "extreme" -- the
+    # contrarian score/confidence saturate at +-this. Bybit funding on
+    # BTC/ETH is typically within +-0.02-0.05% outside real FOMO/panic spikes.
+    normalize_pct: 0.05
 
 trade_management:
   # initial stop distance = atr * this multiplier
   atr_sl_multiplier: 1.5
-  # initial take-profit distance = atr * this multiplier
-  atr_tp_multiplier: 2.5
+  # initial take-profit distance = atr * this multiplier. Raised from 2.5: the
+  # loss side now gets cut earlier (adverse-move tightening) and the win side
+  # locks in a real gain sooner (breakeven_after_rr/buffer above) -- both free
+  # up room to ask more of a genuine trend before taking full profit, instead
+  # of capping the upside at the old, comparatively narrow target.
+  atr_tp_multiplier: 3.2
   # once unrealized profit reaches this multiple of the initial risk (R),
-  # start trailing (move SL to breakeven and beyond).
-  breakeven_after_rr: 0.5
+  # start trailing (move SL to breakeven and beyond). Raised from 0.5: winning
+  # trades were repeatedly getting clipped for a near-zero gain within minutes
+  # of breakeven triggering (observed live: UNIUSDT and ZECUSDT both hit their
+  # breakeven SL just 3 minutes after it was set), never reaching the 1R
+  # partial-tp/TP zone -- 0.5R was too shallow to distinguish a real move from
+  # ordinary noise.
+  breakeven_after_rr: 0.7
+  # breakeven SL is placed this many ATR past entry (favorable direction), not
+  # exactly at entry -- an unbuffered breakeven stop gets clipped by ordinary
+  # noise (price revisiting its own entry level is common mid-trend), turning
+  # a real trend into a string of small losses. The buffer both requires a
+  # real move to trigger and locks in a small win instead when it does.
+  # Raised from 0.2: at 0.2, the locked-in win was only ~13% of the initial
+  # risk (R) -- still tight enough to clip on routine noise for a near-zero
+  # gain. 0.4 (~27% of R) requires a more real pullback to trigger and locks
+  # in a more meaningful win when it does, directly targeting the average-win
+  # side of the win/loss size asymmetry (avg loss was running ~5x avg win).
+  breakeven_buffer_atr_mult: 0.4
   trail_activation_rr: 1.0
-  # how far (in ATR) to push SL behind price once trailing is active.
-  trail_atr_multiplier: 1.2
+  # lock in profit on part of the position once it reaches at_rr multiples of
+  # initial risk, closing close_fraction of the qty at market and letting the
+  # rest keep riding (still eligible for breakeven/trailing/TP-extension
+  # afterward). Skipped for a trade whose remaining/partial qty would round
+  # below the exchange's min order size -- rides the whole position instead.
+  # Not applied to range/scalp trades (see is_range_trade below).
+  # close_fraction lowered from 0.5: locking in half the position at just 1R
+  # capped how big the eventual win could register even on a trade that went
+  # on to trend much further -- 0.35 still banks real profit early for safety
+  # but leaves more size riding toward the now-wider TP/trailing exit.
+  partial_tp:
+    enabled: true
+    at_rr: 1.0
+    close_fraction: 0.35
+  # how far (in ATR) to push SL behind price once trailing is active. Raised
+  # from 1.2: that was tight enough to catch an ordinary pullback within a
+  # still-intact trend, capping how much of a real move actually got captured
+  # before exit.
+  trail_atr_multiplier: 1.6
   # if signals/momentum still strongly favor the position when price nears TP,
   # extend TP outward by this many ATR instead of taking profit immediately.
   tp_extend_atr_step: 0.75
   # only extend TP this many times per trade, to avoid never taking profit.
-  max_tp_extensions: 3
-  # emergency exit: if price moves this % against the position within
-  # flash_move_window_sec, close immediately at market regardless of SL.
-  flash_move_pct: 1.2
+  # Raised from 3 now that the base TP itself is wider -- a signal that's
+  # still strongly confirming shouldn't be cut off from riding further just
+  # because it hit an extension-count ceiling.
+  max_tp_extensions: 4
+  # emergency exit: if price moves against the position within
+  # flash_move_window_sec by at least flash_move_atr_mult x (that position's
+  # entry-time ATR as a % of entry price), close immediately at market
+  # regardless of SL. Scales with each symbol's own volatility instead of one
+  # fixed % for every symbol -- a fixed % can let a highly volatile coin drift
+  # a long way before ever firing, while being needlessly twitchy on a calm
+  # one. Clamped to [flash_move_min_pct, flash_move_max_pct] either way.
+  flash_move_atr_mult: 1.0
+  flash_move_min_pct: 0.8
+  flash_move_max_pct: 3.0
   flash_move_window_sec: 45
   # if the fast signal flips hard against an open position (score crosses
   # this magnitude opposite to position side) with decent confidence, exit early.
-  reversal_exit_score: 0.4
-  reversal_exit_confidence: 0.6
+  # Lowered from 0.4/0.6: a day of shorts that resisted a sustained uptrend for
+  # hours all got closed via SL, with signal_reversal never firing once --
+  # reversal detection was consistently slower than the full SL distance,
+  # cutting nothing early. More sensitive thresholds catch it sooner.
+  reversal_exit_score: 0.3
+  reversal_exit_confidence: 0.5
+  # "give up" exit: if a position has been open at least this long AND price is
+  # still within stale_exit_max_move_pct of entry, close it (profit or loss) and
+  # free the slot for a fresh signal on another symbol. 0 disables this check.
+  # Closing a truly flat position is a guaranteed small loss from round-trip
+  # fees alone -- only worth rushing into when that capital is actually needed.
+  # stale_exit_after_min applies when every slot/margin is currently in use;
+  # stale_exit_after_min_no_pressure (much longer) applies when there's free
+  # room and nothing is waiting on this position's capital.
+  stale_exit_after_min: 60
+  stale_exit_after_min_no_pressure: 240
+  stale_exit_max_move_pct: 0.5
+  # after ANY losing close (stale_timeout, sl_tp_hit, signal_reversal, etc.),
+  # block a same-symbol/same-direction re-entry for this many minutes --
+  # prevents immediately re-firing the same losing bet on a still-noisy read.
+  # Observed live: a symbol stuck in a strong trend got shorted, stopped out
+  # for a real loss, and was re-shorted within minutes, losing again. A
+  # genuine reversal (signal now favors the other side) is not blocked. 0
+  # disables this.
+  loss_reentry_cooldown_min: 30
+
+  # Adverse-move stop tightening: the mirror of breakeven/trailing above, which
+  # only ever protect a position once it's WINNING. A losing position normally
+  # rides its full initial SL distance no matter what, even once the signal
+  # that justified it has stopped supporting it. With win rate holding around
+  # ~44% but equity still eroding, the losing side's average loss size -- not
+  # the hit rate -- is the direct lever: once a position is underwater by at
+  # least adverse_tighten_start_rr (as a multiple of initial risk) AND the
+  # signal has faded (confidence below adverse_tighten_confidence_floor, OR
+  # flipped direction, OR its score has drifted below adverse_tighten_score_floor),
+  # SL is pulled in to current_price +/- atr * adverse_tighten_atr_multiplier
+  # instead of waiting for the full initial SL. Only ever tightens, same as
+  # trailing -- a losing trade whose signal is still intact is left alone to
+  # ride its normal SL/TP. Must stay meaningfully below atr_sl_multiplier (1.5)
+  # for this to actually improve on the initial SL rather than being a no-op;
+  # 0.5 caps a stopped-out loss at roughly two-thirds of the original risk
+  # once the signal has faded, instead of the full initial distance.
+  # 0 (adverse_tighten_start_rr) disables this.
+  adverse_tighten_start_rr: 0.5
+  adverse_tighten_confidence_floor: 0.5
+  adverse_tighten_score_floor: 0.15
+  adverse_tighten_atr_multiplier: 0.5
+  # Per-trade override of adverse_tighten_start_rr above, applied only to a
+  # trade entered already extended (risk.chase_caution_atr_mult) -- earlier
+  # than the global 0.5 so a chase-flavored trade that starts reversing gets
+  # noticed and cut sooner. Unset entirely (comment out / remove) to leave
+  # even flagged trades on the global default.
+  adverse_tighten_start_rr_caution: 0.25
+
+  # Entry-failure backoff: after a failed entry attempt, block retrying the
+  # same symbol for a while instead of hammering it every tick (observed live:
+  # a symbol retried 12x on insufficient margin before finally filling; another
+  # kept failing SL/TP attach and eating a round-trip fee on every attempt via
+  # the force-close-for-safety path; a third was permanently blocked by a
+  # regional restriction and kept getting retried every rescan regardless).
+  # entry_fail_backoff_min: generic order placement failure (e.g. insufficient
+  # margin) -- short, since conditions like margin headroom can change soon.
+  entry_fail_backoff_min: 5
+  # sl_tp_fail_backoff_min: SL/TP failed to attach and the position was force-
+  # closed for safety -- longer, since that already cost a round-trip fee and
+  # suggests a symbol-specific issue, not just bad timing.
+  sl_tp_fail_backoff_min: 60
+  # permanent_error_backoff_min: a non-retryable exchange error (e.g. Bybit
+  # ErrCode 110132 regional restriction) -- effectively "stop trying this
+  # symbol for the rest of the session" rather than retrying every rescan.
+  permanent_error_backoff_min: 1440
+  # Once the SAME symbol hits sl_tp_attach_failed this many times in a row,
+  # escalate its backoff from sl_tp_fail_backoff_min (60min) to the long
+  # permanent_error_backoff_min tier instead. Observed live: PUMPFUNUSDT
+  # failed to attach SL/TP four separate times in one session, ~60-90min
+  # apart (retrying every time its backoff expired) -- each attempt forced
+  # a safety-close and paid a round-trip fee with zero chance of ever
+  # succeeding, since a single symbol repeatedly failing the same way points
+  # at a persistent, symbol-specific problem, not bad timing.
+  sl_tp_repeat_fail_threshold: 2
+
+  # Range/mean-reversion scalp entries, only tried when the trend signal
+  # (technical+news+polymarket) is neutral. Enter long near the recent range
+  # low / short near the recent range high, at the symbol's max configured
+  # leverage, for a quick scalp -- no trailing or TP-extension, exits only via
+  # its own (tight) SL/TP plus the shared flash-move/reversal/stale-timeout checks.
+  range_trade:
+    enabled: true
+    # how close to the range high/low (in ATR) counts as "at the edge".
+    edge_atr_mult: 0.5
+    # a neutral aggregate signal doesn't by itself mean price is actually
+    # ranging -- it can also happen mid-trend when sub-signals disagree. Only
+    # treat it as a real range if the high-low width over range_lookback
+    # candles is no more than this many ATR; a wider band means the market is
+    # trending/expanding, not consolidating, and range trades are skipped.
+    max_range_width_atr_mult: 4.0
+    # Tighter SL/TP than trend trades -- this is meant to be a quick scalp.
+    # Raised from 1.0 -> 1.3: at 1.0, an ATR near the general volatility floor
+    # (0.15%) put the SL distance almost the same size as the ~0.11% round-trip
+    # fee, so fees ate a large share of every scalp's risk/reward.
+    atr_sl_multiplier: 1.3
+    atr_tp_multiplier: 1.3
+    # Range scalps are more fee-sensitive per trade than trend entries (tighter
+    # multiplier above), so require a stricter volatility floor than the
+    # general min_volatility_atr_pct before even considering a range entry.
+    min_atr_pct: 0.25
 
 loop:
   fast_poll_sec: 8          # price/emergency-exit checks while a position is open
   idle_poll_sec: 20         # checks while flat, waiting for an entry signal
-  signal_refresh_sec: 120   # how often to recompute the full multi-factor signal
+  signal_refresh_sec: 30    # how often to recompute the full multi-factor signal
 
 dashboard:
   enabled: true

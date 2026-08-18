@@ -93,6 +93,51 @@ class BybitClient:
             raise BybitAPIError(f"no ticker data for {symbol}")
         return float(lst[0]["lastPrice"])
 
+    def get_all_tickers(self) -> list[dict]:
+        """Returns Bybit's raw ticker list for every symbol in this client's
+        category (no symbol filter) -- one cheap call used to rank/screen the
+        whole tradable universe (e.g. by 24h turnover) instead of fetching
+        candles for every symbol individually.
+        """
+        result = self._call(self.session.get_tickers, category=self.category)
+        return result.get("list", [])
+
+    def get_taker_fee_rate(self, symbol: str) -> float | None:
+        """This account's taker fee rate for `symbol` (e.g. 0.00055 for
+        0.055%), or None if the lookup fails. Some newly-listed/lower-liquidity
+        perpetuals carry a materially higher fee tier than the standard rate --
+        used to screen those out of the dynamic universe scan.
+        """
+        try:
+            result = self._call(self.session.get_fee_rates, category=self.category, symbol=symbol)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["takerFeeRate"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def get_funding_rate(self, symbol: str) -> float | None:
+        """Current perpetual funding rate for `symbol` (e.g. 0.0001 = 0.01% per
+        interval), or None if unavailable. Used as a contrarian crowd-positioning
+        signal -- extreme positive funding means longs are paying heavily to stay
+        long (a crowded trade prone to squeezes/pullbacks) and vice versa.
+        """
+        try:
+            result = self._call(self.session.get_tickers, category=self.category, symbol=symbol)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["fundingRate"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def get_instrument_info(self, symbol: str) -> InstrumentInfo:
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
@@ -122,6 +167,27 @@ class BybitClient:
             raise BybitAPIError("no wallet balance data")
         return float(lst[0]["totalEquity"])
 
+    def get_available_balance_usdt(self) -> float | None:
+        """This account's real available margin balance for new orders, straight
+        from Bybit -- unlike equity, this already nets out whatever the exchange
+        itself reserves (funding, existing positions' margin, etc.), so it
+        catches drift our own local headroom estimate can't see. Returns None
+        if the field is missing or the lookup fails; callers should treat that
+        as "unknown" and fall back to the local estimate rather than blocking
+        entries outright.
+        """
+        try:
+            result = self._call(self.session.get_wallet_balance, accountType="UNIFIED")
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        try:
+            return float(lst[0]["totalAvailableBalance"])
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def get_position(self, symbol: str) -> dict | None:
         result = self._call(self.session.get_positions, category=self.category, symbol=symbol)
         for p in result.get("list", []):
@@ -133,8 +199,84 @@ class BybitClient:
                     "entry_price": float(p["avgPrice"]),
                     "unrealized_pnl": float(p.get("unrealisedPnl") or 0),
                     "position_idx": int(p.get("positionIdx") or 0),
+                    # "0"/"" from Bybit means no SL/TP is actually set on this
+                    # position -- used to verify one was actually attached
+                    # (place_order's stopLoss/takeProfit params can silently
+                    # fail to attach even when the base order itself fills).
+                    "stop_loss": float(p.get("stopLoss") or 0),
+                    "take_profit": float(p.get("takeProfit") or 0),
                 }
         return None
+
+    def get_all_open_positions(self, settle_coin: str = "USDT") -> list[dict]:
+        """Lists every currently open position under this settle coin, regardless
+        of symbol -- used to reconcile local state against reality (e.g. a
+        position that's open on the exchange but the bot lost track of after a
+        state reset, so its SL/TP would otherwise never get checked).
+        """
+        result = self._call(self.session.get_positions, category=self.category, settleCoin=settle_coin)
+        out = []
+        for p in result.get("list", []):
+            if float(p.get("size") or 0) <= 0:
+                continue
+            out.append({
+                "symbol": p["symbol"],
+                "side": p["side"],
+                "size": float(p["size"]),
+                "entry_price": float(p["avgPrice"]),
+                "unrealized_pnl": float(p.get("unrealisedPnl") or 0),
+                "position_idx": int(p.get("positionIdx") or 0),
+                "stop_loss": float(p.get("stopLoss") or 0),
+                "take_profit": float(p.get("takeProfit") or 0),
+            })
+        return out
+
+    def get_closed_pnl(self, symbol: str) -> dict | None:
+        """Returns the exchange's own record for the most recently closed position
+        on `symbol`, whose closedPnl is net of trading fees (unlike computing
+        entry/exit price difference ourselves, which ignores fees). Returns None
+        if no record is found yet (can lag a close by a few seconds) or on error --
+        callers should fall back to an estimate in that case.
+        """
+        try:
+            result = self._call(self.session.get_closed_pnl, category=self.category, symbol=symbol, limit=1)
+        except BybitAPIError:
+            return None
+        lst = result.get("list", [])
+        if not lst:
+            return None
+        rec = lst[0]
+        try:
+            return {
+                "closed_pnl": float(rec["closedPnl"]),
+                "avg_exit_price": float(rec["avgExitPrice"]),
+                "updated_time_ms": int(rec["updatedTime"]),
+            }
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def get_closed_pnl_since(self, start_time_ms: int) -> list[dict]:
+        """Every closed-pnl record (across all symbols) since start_time_ms,
+        paginating through Bybit's cursor if there's more than one page. Used
+        to reconstruct today's realized PnL from the exchange's own records
+        after a local state reset, instead of just assuming it was 0.
+        """
+        out: list[dict] = []
+        cursor = None
+        for _ in range(20):  # hard cap so a pagination bug can't loop forever
+            kwargs = dict(category=self.category, startTime=start_time_ms, limit=100)
+            if cursor:
+                kwargs["cursor"] = cursor
+            try:
+                result = self._call(self.session.get_closed_pnl, **kwargs)
+            except BybitAPIError:
+                logger.exception("failed to fetch closed-pnl history since %s", start_time_ms)
+                break
+            out.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+        return out
 
     def set_leverage(self, symbol: str, leverage: float) -> None:
         lev = str(int(leverage))
