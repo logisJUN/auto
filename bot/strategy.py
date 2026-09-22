@@ -148,23 +148,55 @@ class Strategy:
                                      "leverage": leverage, "signal": signal})
 
     # -- exits / management ---------------------------------------------------------
-    def _close_and_settle(self, symbol: str, trade: dict, reason: str):
-        try:
-            self.client.close_position(symbol, trade["side"], trade["qty"])
-        except BybitAPIError as exc:
-            logger.error("failed to close %s: %s", symbol, exc)
-            log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
-            return
+    def _resolve_exit(self, symbol: str, trade: dict) -> tuple[float, float]:
+        """Prefers the exchange's own closed-pnl record (real fill price, fees already
+        netted out of closedPnl) over approximating with a post-close get_last_price().
+        Retries briefly since the record can lag a couple seconds behind the fill, and
+        only trusts a record that was updated in roughly the last 30s so an unrelated
+        older close for the same symbol is never mistaken for this one.
+        """
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1.5)
+            try:
+                records = self.client.get_closed_pnl(symbol, limit=5)
+            except BybitAPIError:
+                records = []
+            for r in records:
+                updated_ms = int(r.get("updatedTime") or 0)
+                if updated_ms and time.time() - updated_ms / 1000 <= 30:
+                    try:
+                        return float(r["avgExitPrice"]), float(r["closedPnl"])
+                    except (KeyError, ValueError, TypeError):
+                        pass
 
+        logger.warning("no fresh closed-pnl record for %s; falling back to approximate pnl", symbol)
         try:
             exit_price = self.client.get_last_price(symbol)
         except BybitAPIError:
             exit_price = trade["entry_price"]
-
         if trade["side"] == "long":
             pnl = (exit_price - trade["entry_price"]) * trade["qty"]
         else:
             pnl = (trade["entry_price"] - exit_price) * trade["qty"]
+        return exit_price, pnl
+
+    def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
+        """already_closed=True means the exchange has no open position for this symbol
+        already (the sl_tp_hit case) -- sending another reduce-only close order in that
+        state gets rejected by Bybit (nothing left to reduce), which used to make this
+        function return early on that error and leave the trade stuck in state forever,
+        with the bot endlessly retrying a close that can never succeed.
+        """
+        if not already_closed:
+            try:
+                self.client.close_position(symbol, trade["side"], trade["qty"])
+            except BybitAPIError as exc:
+                logger.error("failed to close %s: %s", symbol, exc)
+                log_decision(self.log_dir, {"event": "close_failed", "symbol": symbol, "error": str(exc)})
+                return
+
+        exit_price, pnl = self._resolve_exit(symbol, trade)
 
         self.state.add_realized_pnl(pnl)
         self.state.set_trade(symbol, None)
@@ -187,8 +219,9 @@ class Strategy:
 
         exchange_position = self.client.get_position(symbol)
         if exchange_position is None:
-            # SL or TP was hit on the exchange side since our last check.
-            self._close_and_settle(symbol, trade, "sl_tp_hit")
+            # SL or TP was hit on the exchange side since our last check -- already
+            # flat, so don't send another close order.
+            self._close_and_settle(symbol, trade, "sl_tp_hit", already_closed=True)
             return
 
         price = self.client.get_last_price(symbol)
