@@ -122,6 +122,17 @@ class BybitClient:
             raise BybitAPIError("no wallet balance data")
         return float(lst[0]["totalEquity"])
 
+    def get_closed_pnl(self, symbol: str, limit: int = 5) -> list[dict]:
+        """Returns the exchange's own realized-PnL records for this symbol, newest first.
+        Each record includes actual avgEntryPrice/avgExitPrice and closedPnl (fees already
+        netted out) -- more accurate than approximating with a post-close get_last_price().
+        """
+        result = self._call(
+            self.session.get_closed_pnl,
+            category=self.category, symbol=symbol, limit=limit,
+        )
+        return result.get("list", [])
+
     def get_position(self, symbol: str) -> dict | None:
         result = self._call(self.session.get_positions, category=self.category, symbol=symbol)
         for p in result.get("list", []):
