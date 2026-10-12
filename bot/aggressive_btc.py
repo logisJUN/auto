@@ -115,12 +115,19 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
     both long and short are eligible, whichever the blend favors. Polymarket
     only counts when it actually found something relevant (its own
     confidence), same pattern as the main bot.
+
+    Polymarket is weighted low (0.10) relative to technical (0.75): its
+    crypto-relevant markets are mostly weeks-to-months-out questions (rate
+    decisions, year-end price targets), which has little theoretical
+    connection to a 1-hour directional call, and in practice its own
+    confidence is usually 0 (no relevant markets found) anyway -- kept as a
+    minor input rather than a primary one.
     """
     tech_score = technical_result.get("score", 0.0)
     poly_score = poly_result.get("score", 0.0)
     poly_conf = poly_result.get("confidence", 0.0)
 
-    blended = 0.6 * tech_score + 0.15 * volume_score + 0.25 * (poly_score * poly_conf)
+    blended = 0.75 * tech_score + 0.15 * volume_score + 0.10 * (poly_score * poly_conf)
     blended = max(-1.0, min(1.0, blended))
 
     if blended >= MIN_CONFIDENCE_TO_ENTER:
