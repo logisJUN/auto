@@ -106,6 +106,14 @@ def test_signal_ignores_polymarket_when_its_confidence_is_zero():
     assert result["direction"] == "neutral"
 
 
+def test_signal_includes_component_breakdown_for_display():
+    tech = {"score": 0.41, "atr": 1.0, "close": 100.0}
+    poly = {"score": 0.2, "confidence": 0.5}
+    result = compute_signal(tech, volume_score=0.1, poly_result=poly)
+    assert result["components"] == {"technical": 0.41, "volume": 0.1,
+                                     "polymarket": 0.2, "polymarket_confidence": 0.5}
+
+
 # -- roi_pct / should_hourly_cutoff ---------------------------------------------------------
 
 def test_roi_pct_basic():
@@ -188,17 +196,85 @@ def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
     assert trade is not None
     assert trade["side"] == "long"
     assert trade["margin"] == 50.0  # 50% of 100 equity
+    assert state.get_skip_reason("BTCUSDT") is None
+
+
+def test_try_enter_clears_a_previously_set_skip_reason_on_successful_entry(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_skip_reason("BTCUSDT", "관망 중 - 신호 약함 (stale)")
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    assert state.get_skip_reason("BTCUSDT") is None
 
 
 def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    strategy.get_signal = lambda: {"direction": "neutral", "score": 0.0, "atr": 1.0, "close": 100.0}
+    strategy.get_signal = lambda: {
+        "direction": "neutral", "score": 0.0, "atr": 1.0, "close": 100.0,
+        "components": {"technical": 0.1, "volume": -0.05, "polymarket": 0.0, "polymarket_confidence": 0.0},
+    }
     client.get_equity_usdt.return_value = 100.0
 
     strategy.try_enter()
 
     client.open_position.assert_not_called()
     assert state.get_trade("BTCUSDT") is None
+    reason = state.get_skip_reason("BTCUSDT")
+    assert reason is not None
+    assert "관망 중" in reason["reason"]
+    assert "T:+0.10" in reason["reason"]
+    assert "V:-0.05" in reason["reason"]
+
+
+def test_try_enter_sets_skip_reason_when_no_margin_available(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 0.0
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    reason = state.get_skip_reason("BTCUSDT")
+    assert reason is not None
+    assert "여유 증거금 없음" in reason["reason"]
+
+
+def test_try_enter_sets_skip_reason_when_order_sizing_fails(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+
+    import bot.aggressive_btc as agg_mod
+
+    class FakeSizing:
+        ok = False
+        reason = "below minimum notional"
+        qty = 0.0
+
+    original_compute = agg_mod.compute_qty_fixed_margin
+    agg_mod.compute_qty_fixed_margin = lambda **kwargs: FakeSizing()
+    try:
+        strategy.try_enter()
+    finally:
+        agg_mod.compute_qty_fixed_margin = original_compute
+
+    client.open_position.assert_not_called()
+    reason = state.get_skip_reason("BTCUSDT")
+    assert reason is not None
+    assert "주문 크기 조건 미충족" in reason["reason"]
 
 
 def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
@@ -217,6 +293,9 @@ def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
 
     client.close_position.assert_called_once()
     assert state.get_trade("BTCUSDT") is None
+    reason = state.get_skip_reason("BTCUSDT")
+    assert reason is not None
+    assert "SL/TP 설정 실패" in reason["reason"]
 
 
 def test_manage_open_position_closes_on_hourly_cutoff(tmp_path):

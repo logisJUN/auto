@@ -138,7 +138,9 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
         direction = "neutral"
 
     return {"direction": direction, "score": blended, "atr": technical_result.get("atr", 0.0),
-            "close": technical_result.get("close", 0.0)}
+            "close": technical_result.get("close", 0.0),
+            "components": {"technical": tech_score, "volume": volume_score,
+                            "polymarket": poly_score, "polymarket_confidence": poly_conf}}
 
 
 def should_hourly_cutoff(hours_open: float, roi_pct: float, last_hour_checked: int) -> tuple[bool, int]:
@@ -179,12 +181,24 @@ class AggressiveBTCStrategy:
         return compute_signal(tech_result, vol_score, poly_result)
 
     # -- entry ---------------------------------------------------------
+    def _format_signal_breakdown(self, signal: dict) -> str:
+        c = signal.get("components", {})
+        return (f"T:{c.get('technical', 0.0):+.2f} V:{c.get('volume', 0.0):+.2f} "
+                f"P:{c.get('polymarket', 0.0):+.2f}(conf {c.get('polymarket_confidence', 0.0):.2f}) "
+                f"-> blended={signal['score']:+.2f}")
+
     def try_enter(self):
         if self.state.get_trade(SYMBOL) is not None:
             return
 
         signal = self.get_signal()
-        if signal["direction"] == "neutral" or signal["atr"] <= 0 or signal["close"] <= 0:
+        if signal["atr"] <= 0 or signal["close"] <= 0:
+            self.state.set_skip_reason(SYMBOL, "가격/ATR 데이터 없음")
+            return
+        if signal["direction"] == "neutral":
+            self.state.set_skip_reason(
+                SYMBOL, f"관망 중 - 신호 약함 ({self._format_signal_breakdown(signal)}, "
+                        f"기준 ±{MIN_CONFIDENCE_TO_ENTER:.2f})")
             return
 
         equity = self.client.get_equity_usdt()
@@ -193,6 +207,7 @@ class AggressiveBTCStrategy:
         if available is not None:
             margin = min(margin, available)
         if margin <= 0:
+            self.state.set_skip_reason(SYMBOL, "여유 증거금 없음")
             return
 
         atr_pct = signal["atr"] / signal["close"] * 100.0
@@ -211,6 +226,7 @@ class AggressiveBTCStrategy:
         )
         if not sizing.ok:
             logger.info("aggressive_btc: skip entry, %s", sizing.reason)
+            self.state.set_skip_reason(SYMBOL, f"주문 크기 조건 미충족 ({sizing.reason})")
             return
 
         qty = self.client.round_qty(SYMBOL, sizing.qty)
@@ -222,6 +238,7 @@ class AggressiveBTCStrategy:
             self.client.open_position(SYMBOL, side, qty, stop_loss=sl_price, take_profit=tp_price)
         except BybitAPIError as exc:
             logger.error("aggressive_btc: failed to open position: %s", exc)
+            self.state.set_skip_reason(SYMBOL, f"주문 실패 ({exc})")
             return
 
         # Same safety-first pattern as the main bot: verify SL/TP actually
@@ -237,6 +254,7 @@ class AggressiveBTCStrategy:
             except BybitAPIError as exc:
                 logger.critical("aggressive_btc: COULD NOT CLOSE UNPROTECTED POSITION -- MANUAL ACTION REQUIRED: %s", exc)
             self.notifier.send(f"[긴급] aggressive_btc: {SYMBOL} SL/TP 설정 실패 - 긴급 청산 시도. Bybit 앱에서 직접 확인하세요.")
+            self.state.set_skip_reason(SYMBOL, "SL/TP 설정 실패로 긴급 청산됨")
             return
 
         trade = {
@@ -245,6 +263,7 @@ class AggressiveBTCStrategy:
             "opened_at": time.time(), "last_hour_checked": 0,
         }
         self.state.set_trade(SYMBOL, trade)
+        self.state.clear_skip_reason(SYMBOL)
         msg = (f"[aggressive_btc 진입] {SYMBOL} {side.upper()} qty={qty} entry~{entry_price:.2f} "
                f"SL={sl_price:.2f} TP={tp_price:.2f} lev={leverage:.1f}x score={signal['score']:+.2f}")
         logger.info(msg)

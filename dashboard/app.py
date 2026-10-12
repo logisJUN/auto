@@ -140,8 +140,10 @@ def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
         })
 
     cumulative_pnl = sum(t.get("pnl", 0.0) for t in snapshot.get("history", []))
+    skip = snapshot.get("skip_reasons", {}).get(aggressive_btc.SYMBOL)
     return {"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
-            "trade_count": len(snapshot.get("history", []))}
+            "trade_count": len(snapshot.get("history", [])),
+            "skip_reason": skip.get("reason") if skip else None}
 
 
 def _build_equity_curve(history: list[dict]) -> dict | None:
@@ -452,7 +454,7 @@ TEMPLATE = """
       </tr>
     </table>
     {% else %}
-    <div class="small">현재 열린 포지션 없음</div>
+    <div class="small">{{ aggressive_btc.skip_reason if aggressive_btc.skip_reason else '현재 열린 포지션 없음 - 진입 신호 대기 중' }}</div>
     {% endif %}
     <div class="grid" style="margin-top:8px;">
       <div><div class="stat-label">누적 손익</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.cumulative_pnl) }}</div></div>
