@@ -42,11 +42,14 @@ services:
         sync: false
       # bot/aggressive_btc.py: separate, optional BTCUSDT-only strategy.
       # AGGRESSIVE_BTC_ENABLED must be explicitly "true" for it to run at
-      # all -- deploying this file's changes alone never starts it. See
-      # .env.example for what the testnet keys are for and why a live
-      # BYBIT_API_KEY above can't be reused for them.
+      # all -- deploying this file's changes alone never starts it. sync:
+      # false (not a committed value) so a manual "true" set in the Render
+      # dashboard sticks instead of getting reset back to this file's
+      # default on every blueprint-synced deploy. See .env.example for what
+      # the testnet keys are for and why a live BYBIT_API_KEY above can't be
+      # reused for them.
       - key: AGGRESSIVE_BTC_ENABLED
-        value: "false"
+        sync: false
       - key: AGGRESSIVE_BTC_TESTNET_API_KEY
         sync: false
       - key: AGGRESSIVE_BTC_TESTNET_API_SECRET
