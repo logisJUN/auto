@@ -22,6 +22,7 @@ from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import compute_performance_summary, read_recent_decisions
 from bot.risk import stress_test
 from bot.state import StateStore
+from bot import aggressive_btc
 
 app = Flask(__name__)
 cfg = load_config()
@@ -94,6 +95,53 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
             "side": trade["side"], "entry_price": trade["entry_price"], "unrealized": unrealized,
         })
     return out
+
+
+def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
+    """Standalone view of bot/aggressive_btc.py's own, SEPARATE state file --
+    None if that module has never run (no state file yet), so this section
+    simply doesn't render rather than showing an empty shell forever. Reuses
+    this dashboard's own `client` for price lookups, which assumes
+    aggressive_btc is pointed at the same account (live vs testnet) this
+    dashboard's BYBIT_TESTNET is configured for -- true once aggressive_btc
+    is flipped to live (it then shares the main bot's live account).
+    """
+    path = aggressive_btc.state_path()
+    if not os.path.exists(path):
+        return None
+    state = StateStore(path)
+    snapshot = state.snapshot()
+
+    trade = snapshot.get("trades", {}).get(aggressive_btc.SYMBOL)
+    position = None
+    if trade is not None:
+        try:
+            price = client.get_last_price(aggressive_btc.SYMBOL)
+        except BybitAPIError:
+            price = trade["entry_price"]
+        if trade["side"] == "long":
+            unrealized = (price - trade["entry_price"]) * trade["qty"]
+        else:
+            unrealized = (trade["entry_price"] - price) * trade["qty"]
+        roi = aggressive_btc.roi_pct(unrealized, trade["margin"])
+        hours_open = (time.time() - trade["opened_at"]) / 3600.0
+        position = {
+            **trade, "last_price": price, "unrealized": unrealized, "roi_pct": roi,
+            "hours_open": hours_open,
+        }
+
+    history = []
+    for t in sorted(snapshot.get("history", []), key=lambda h: h.get("closed_at", 0.0), reverse=True)[:15]:
+        margin = t.get("margin")
+        roi = (t.get("pnl", 0.0) / margin * 100.0) if margin else None
+        history.append({
+            **t, "roi_pct": roi,
+            "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(t.get("closed_at", time.time()))),
+        })
+
+    cumulative_pnl = sum(t.get("pnl", 0.0) for t in snapshot.get("history", []))
+    return {"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
+            "trade_count": len(snapshot.get("history", []))}
 
 
 def _build_equity_curve(history: list[dict]) -> dict | None:
@@ -380,6 +428,57 @@ TEMPLATE = """
   </div>
   {% endif %}
 
+  {% if aggressive_btc %}
+  <div class="card">
+    <h2 style="font-size:1rem;">⚡ Aggressive BTC (별도 전략)</h2>
+    {% if aggressive_btc.position %}
+    <table>
+      <tr><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th>
+          <th>미실현손익</th><th>ROI%</th><th>경과</th></tr>
+      <tr>
+        <td class="{{ 'pos-long' if aggressive_btc.position.side == 'long' else 'pos-short' }}">
+          {{ aggressive_btc.position.side.upper() }}</td>
+        <td>{{ '%.1f'|format(aggressive_btc.position.leverage) }}x</td>
+        <td>{{ aggressive_btc.position.qty }}</td>
+        <td>{{ aggressive_btc.position.entry_price }}</td>
+        <td>{{ aggressive_btc.position.last_price }}</td>
+        <td>{{ '%.2f'|format(aggressive_btc.position.current_sl) }}</td>
+        <td>{{ '%.2f'|format(aggressive_btc.position.current_tp) }}</td>
+        <td class="{{ 'pnl-pos' if aggressive_btc.position.unrealized >= 0 else 'pnl-neg' }}">
+          {{ '%.4f'|format(aggressive_btc.position.unrealized) }}</td>
+        <td class="{{ 'pnl-pos' if aggressive_btc.position.roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(aggressive_btc.position.roi_pct) }}%</td>
+        <td class="small">{{ '%.1f'|format(aggressive_btc.position.hours_open) }}h</td>
+      </tr>
+    </table>
+    {% else %}
+    <div class="small">현재 열린 포지션 없음</div>
+    {% endif %}
+    <div class="grid" style="margin-top:8px;">
+      <div><div class="stat-label">누적 손익</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.cumulative_pnl) }}</div></div>
+      <div><div class="stat-label">청산된 거래</div><div class="stat-value">{{ aggressive_btc.trade_count }}건</div></div>
+    </div>
+    {% if aggressive_btc.history %}
+    <table style="margin-top:8px;">
+      <tr><th>시각</th><th>방향</th><th>진입가</th><th>레버리지</th><th>손익</th><th>ROI%</th><th>사유</th></tr>
+      {% for t in aggressive_btc.history %}
+      <tr>
+        <td class="small">{{ t.time_str }}</td>
+        <td class="{{ 'pos-long' if t.side == 'long' else 'pos-short' }}">{{ t.side.upper() }}</td>
+        <td>{{ t.entry_price }}</td>
+        <td>{{ '%.1f'|format(t.leverage) if t.leverage else '-' }}x</td>
+        <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
+        <td class="{{ 'pnl-pos' if t.roi_pct is not none and t.roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(t.roi_pct) + '%' if t.roi_pct is not none else '-' }}</td>
+        <td class="small">{{ t.reason }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+    <div class="small">메인 봇과 완전히 분리된 별도 상태 파일을 사용합니다.</div>
+  </div>
+  {% endif %}
+
   <div class="card">
     <h2 style="font-size:1rem;">최근 판단 로그</h2>
     <table>
@@ -565,6 +664,7 @@ def index():
 
     stress = _get_stress_test(equity, snapshot.get("trades", {})) if equity > 0 else None
     perf = compute_performance_summary(log_dir)
+    aggressive_btc_view = _build_aggressive_btc_view(client)
 
     return render_template_string(
         TEMPLATE,
@@ -586,6 +686,7 @@ def index():
         decisions=decisions,
         stress=stress,
         perf=perf,
+        aggressive_btc=aggressive_btc_view,
     )
 
 

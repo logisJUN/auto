@@ -47,7 +47,7 @@ from bot.state import StateStore
 logger = logging.getLogger("bot.aggressive_btc")
 
 # ==============================================================================
-TESTNET = True   # <-- flip this one line to go live. See module docstring.
+TESTNET = False   # <-- flip this one line to go live. See module docstring.
 # ==============================================================================
 
 SYMBOL = "BTCUSDT"
@@ -295,7 +295,7 @@ class AggressiveBTCStrategy:
         self.state.record_closed_trade({
             "symbol": SYMBOL, "side": trade["side"], "entry_price": trade["entry_price"],
             "qty": trade["qty"], "pnl": pnl, "reason": reason, "pnl_is_estimate": pnl_is_estimate,
-            "leverage": trade["leverage"], "closed_at": time.time(),
+            "leverage": trade["leverage"], "margin": trade["margin"], "closed_at": time.time(),
         })
         est_tag = " (est.)" if pnl_is_estimate else ""
         msg = f"[aggressive_btc 종료:{reason}] {SYMBOL} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
