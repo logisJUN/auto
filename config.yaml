@@ -6,7 +6,10 @@
 exchange:
   category: "linear"          # USDT perpetual futures
   # Always-watched symbols, regardless of the dynamic universe scan below.
-  symbols: ["BTCUSDT", "ETHUSDT"]
+  # Restricted to BTCUSDT only -- the account's equity is small enough that
+  # spreading risk across multiple uncorrelated symbols matters less than
+  # keeping the whole operation simple and watchable on a single instrument.
+  symbols: ["BTCUSDT"]
   # Instead of (or in addition to) a hand-picked symbol list, periodically scan
   # every Bybit USDT linear perpetual and watch whichever ones currently have
   # the highest 24h turnover (liquidity) -- one cheap bulk ticker call, not a
@@ -14,12 +17,10 @@ exchange:
   # of the refreshed list keeps being managed (SL/TP/trailing/stale-timeout)
   # until it closes -- it's just not eligible for new entries anymore.
   universe:
-    # re-enabled: staying pinned to just BTC/ETH repeatedly exposed the bot to
-    # the same wrong-direction (short) signal through a sustained correlated
-    # uptrend with no other symbol to diversify into -- the one trade outside
-    # BTC/ETH that day (SOXLUSDT, an already-open position from before the
-    # pin) was the day's best performer.
-    enabled: true
+    # disabled: bot restricted to BTCUSDT only (see symbols above) -- no new
+    # entries on any other symbol. An already-open position on some other
+    # symbol from before this change keeps being managed until it closes.
+    enabled: false
     # Narrowed from 30: still diversified across multiple symbols (avoids the
     # earlier BTC/ETH-only correlated-exposure problem above), but restricted
     # to the higher-liquidity end of the turnover ranking -- less exposure to
