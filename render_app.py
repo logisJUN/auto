@@ -6,6 +6,12 @@ independent systemd services in deploy/ for a VPS -- run in the same process
 here instead: the bot loop runs in a background thread, and the Flask
 dashboard is served (via gunicorn) on the port Render assigns.
 
+bot/aggressive_btc.py (a separate, optional BTCUSDT-only strategy, see its
+own module docstring) can run as a second background thread in this same
+process, gated behind AGGRESSIVE_BTC_ENABLED=true so that deploying updated
+code alone can never start it by surprise -- it has to be deliberately
+turned on via an env var, same as any other opt-in here.
+
 Start command (see render.yaml):
     gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
 
@@ -15,6 +21,7 @@ this module's process, on import.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from bot.main import main as run_bot_forever
@@ -24,6 +31,10 @@ logger = logging.getLogger("bot.render")
 
 _start_lock = threading.Lock()
 _started = False
+
+
+def _env_bool(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _start_bot_thread():
@@ -36,12 +47,18 @@ def _start_bot_thread():
         thread.start()
         logger.info("bot loop started in background thread")
 
+        if _env_bool("AGGRESSIVE_BTC_ENABLED"):
+            from bot.aggressive_btc import main as run_aggressive_btc_forever
+            agg_thread = threading.Thread(target=run_aggressive_btc_forever,
+                                           name="aggressive-btc-loop", daemon=True)
+            agg_thread.start()
+            logger.warning("aggressive_btc loop started in background thread (AGGRESSIVE_BTC_ENABLED=true)")
+
 
 _start_bot_thread()
 
 
 if __name__ == "__main__":
     # Local/manual run without gunicorn: python render_app.py
-    import os
-
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+

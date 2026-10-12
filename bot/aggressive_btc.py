@@ -310,6 +310,24 @@ class AggressiveBTCStrategy:
             self.try_enter()
 
 
+def _resolve_credentials(secrets: Secrets) -> tuple[str, str] | None:
+    """Bybit testnet and live are separate accounts with separate API keys --
+    a live-account key will NOT authenticate against the testnet host. Going
+    live reuses the main bot's own BYBIT_API_KEY/SECRET (same real account);
+    testnet needs its own dedicated AGGRESSIVE_BTC_TESTNET_API_KEY/SECRET
+    from a Bybit testnet account, set separately in .env (see .env.example).
+    Returns None (caller should refuse to start) if whichever pair this mode
+    needs isn't actually configured.
+    """
+    if not TESTNET:
+        return secrets.bybit_api_key, secrets.bybit_api_secret
+    key = os.getenv("AGGRESSIVE_BTC_TESTNET_API_KEY", "").strip()
+    secret = os.getenv("AGGRESSIVE_BTC_TESTNET_API_SECRET", "").strip()
+    if not key or not secret:
+        return None
+    return key, secret
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = load_config()
@@ -321,12 +339,20 @@ def main():
                     mode, SYMBOL, TARGET_PCT, STOP_LOSS_PCT, MIN_LEVERAGE, MAX_LEVERAGE,
                     LEVERAGE_HARD_CAP, MARGIN_PCT_OF_EQUITY)
 
-    client = BybitClient(
-        api_key=secrets.bybit_api_key, api_secret=secrets.bybit_api_secret,
-        testnet=TESTNET, category="linear",
-    )
-    state = StateStore(state_path())
+    credentials = _resolve_credentials(secrets)
     notifier = Notifier(secrets.telegram_bot_token, secrets.telegram_chat_id)
+    if credentials is None:
+        msg = ("aggressive_btc: AGGRESSIVE_BTC_TESTNET_API_KEY/SECRET not set -- "
+               "refusing to start in TESTNET mode without dedicated testnet credentials "
+               "(a live-account key won't authenticate against the testnet host). "
+               "See .env.example.")
+        logger.critical(msg)
+        notifier.send(f"[aggressive_btc] 시작 실패: {msg}")
+        return
+    api_key, api_secret = credentials
+
+    client = BybitClient(api_key=api_key, api_secret=api_secret, testnet=TESTNET, category="linear")
+    state = StateStore(state_path())
     poly_signal = PolymarketSignal(POLYMARKET_CFG)
     strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal)
 

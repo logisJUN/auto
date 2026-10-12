@@ -7,8 +7,11 @@ its own strategy class in isolation.
 import time
 from unittest.mock import MagicMock
 
+import bot.aggressive_btc as aggressive_btc
 from bot.aggressive_btc import (
     AggressiveBTCStrategy,
+    Secrets,
+    _resolve_credentials,
     compute_leverage,
     compute_signal,
     compute_tp_sl_prices,
@@ -291,3 +294,34 @@ def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     strategy.try_enter()
 
     client.get_klines.assert_not_called()
+
+
+# -- _resolve_credentials ---------------------------------------------------------
+
+_SECRETS = Secrets(bybit_api_key="live-key", bybit_api_secret="live-secret", bybit_testnet=False,
+                    newsapi_key=None, telegram_bot_token=None, telegram_chat_id=None,
+                    dashboard_token="t")
+
+
+def test_resolve_credentials_reuses_live_keys_when_going_live(monkeypatch):
+    monkeypatch.setattr(aggressive_btc, "TESTNET", False)
+    result = _resolve_credentials(_SECRETS)
+    assert result == ("live-key", "live-secret")
+
+
+def test_resolve_credentials_uses_dedicated_testnet_keys_when_set(monkeypatch):
+    monkeypatch.setattr(aggressive_btc, "TESTNET", True)
+    monkeypatch.setenv("AGGRESSIVE_BTC_TESTNET_API_KEY", "test-key")
+    monkeypatch.setenv("AGGRESSIVE_BTC_TESTNET_API_SECRET", "test-secret")
+    result = _resolve_credentials(_SECRETS)
+    assert result == ("test-key", "test-secret")
+
+
+def test_resolve_credentials_refuses_testnet_without_dedicated_keys(monkeypatch):
+    """A live-account key cannot authenticate against the testnet host -- this
+    must never silently fall back to the main bot's live BYBIT_API_KEY.
+    """
+    monkeypatch.setattr(aggressive_btc, "TESTNET", True)
+    monkeypatch.delenv("AGGRESSIVE_BTC_TESTNET_API_KEY", raising=False)
+    monkeypatch.delenv("AGGRESSIVE_BTC_TESTNET_API_SECRET", raising=False)
+    assert _resolve_credentials(_SECRETS) is None
