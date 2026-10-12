@@ -1,0 +1,346 @@
+"""Standalone BTCUSDT-only aggressive scalp strategy.
+
+Deliberately SEPARATE from bot/strategy.py (the main, conservative
+multi-symbol system this whole codebase was built around) -- different risk
+philosophy entirely, so it gets its own state file, own main loop, own entry
+point (`python -m bot.aggressive_btc`), and never touches the main bot's
+state or open positions. The two can run side by side without interfering.
+
+Design, as specified:
+  1. 1-hour candles, target +12% ROI (on margin) per trade.
+  2. Both long and short entries, whichever direction the blended signal favors.
+  3. Entry signal: technical (EMA/RSI/MACD/Bollinger + volume) blended with
+     Polymarket, both computed off 1h BTCUSDT candles.
+  4. Stop-loss at -5% ROI.
+  5. Every full hour the position stays open, if its ROI is still negative,
+     close it rather than let it drift indefinitely.
+  6. 50% of equity used as margin per trade.
+  7. Leverage auto-sized so the 12% target is roughly reachable within an
+     hour given BTC's recent realized volatility -- clipped to [6x, 24x],
+     hard-capped at 25x no matter how low volatility reads (the real safety
+     backstop: a calm stretch must never push leverage past this, since a
+     sudden move hits hardest exactly when leverage was raised to compensate
+     for the apparent calm).
+
+================================================================================
+TESTNET below is the ONLY thing that needs to change to go live. Defaults to
+True. Flipping it to False points this module at the real account -- nothing
+else about its risk profile (the 25x cap, -5% SL, hourly loss-cutoff, 50%
+margin-per-trade) changes between test and live; going live only changes
+which account's money is at risk.
+================================================================================
+"""
+from __future__ import annotations
+
+import logging
+import os
+import time
+
+from bot.config import Secrets, load_config
+from bot.exchange.bybit_client import BybitAPIError, BybitClient
+from bot.notify import Notifier
+from bot.risk.position_sizing import compute_qty_fixed_margin
+from bot.signals import technical
+from bot.signals.polymarket import PolymarketSignal
+from bot.state import StateStore
+
+logger = logging.getLogger("bot.aggressive_btc")
+
+# ==============================================================================
+TESTNET = True   # <-- flip this one line to go live. See module docstring.
+# ==============================================================================
+
+SYMBOL = "BTCUSDT"
+TIMEFRAME = "60"                # Bybit kline interval string for 1-hour candles
+TARGET_PCT = 12.0               # take-profit, % ROI on margin
+STOP_LOSS_PCT = 5.0             # stop-loss, % ROI on margin
+HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
+MARGIN_PCT_OF_EQUITY = 50.0     # % of equity used as margin per trade
+MIN_LEVERAGE = 6.0
+MAX_LEVERAGE = 24.0
+LEVERAGE_HARD_CAP = 25.0        # never exceeded regardless of volatility
+MIN_CONFIDENCE_TO_ENTER = 0.5   # |blended score| needed to call it "강세"
+POLL_SEC = 30
+MIN_ORDER_NOTIONAL_USDT = 5.0
+
+TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
+
+POLYMARKET_CFG = {
+    "keywords": ["bitcoin", "crypto", "fed ", "interest rate", "recession"],
+    "refresh_minutes": 15,
+    "max_markets": 40,
+    "relevant_symbols": ["BTCUSDT"],
+}
+
+
+def state_path() -> str:
+    # Own file, never shared with the main bot's data/state.json.
+    return os.path.join(os.getenv("DATA_DIR", "data"), "aggressive_btc_state.json")
+
+
+def compute_leverage(atr_pct: float, target_pct: float = TARGET_PCT,
+                      min_leverage: float = MIN_LEVERAGE, max_leverage: float = MAX_LEVERAGE,
+                      hard_cap: float = LEVERAGE_HARD_CAP) -> float:
+    """Sizes leverage so `target_pct` ROI is roughly reachable given the
+    symbol's recent realized volatility (atr_pct, as a % of price, on the
+    1h timeframe) -- a smaller recent move needs more leverage to turn into
+    the same ROI%, a larger one needs less. Clipped to [min_leverage,
+    max_leverage], then hard-capped at `hard_cap` regardless of how low
+    atr_pct reads -- the backstop against the "calmer market -> higher
+    leverage" feedback loop raising risk exactly when a surprise move would
+    hurt most.
+    """
+    if atr_pct <= 0:
+        return min_leverage
+    required = target_pct / atr_pct
+    return min(hard_cap, max(min_leverage, min(max_leverage, required)))
+
+
+def compute_tp_sl_prices(entry_price: float, side: str, leverage: float,
+                          target_pct: float = TARGET_PCT, stop_loss_pct: float = STOP_LOSS_PCT) -> dict:
+    """TP/SL prices implied by a target/stop expressed as % ROI on margin --
+    ROI% ~= price_move_pct * leverage, so price_move_pct = ROI% / leverage.
+    """
+    target_move = (target_pct / 100.0) / leverage
+    stop_move = (stop_loss_pct / 100.0) / leverage
+    if side == "long":
+        return {"tp": entry_price * (1 + target_move), "sl": entry_price * (1 - stop_move)}
+    return {"tp": entry_price * (1 - target_move), "sl": entry_price * (1 + stop_move)}
+
+
+def compute_signal(technical_result: dict, volume_score: float, poly_result: dict) -> dict:
+    """Blends the 1h technical score (EMA trend + RSI momentum + MACD +
+    Bollinger, from technical.score_timeframe) with volume confirmation and
+    Polymarket's BTCUSDT-relevant sentiment into one directional call --
+    both long and short are eligible, whichever the blend favors. Polymarket
+    only counts when it actually found something relevant (its own
+    confidence), same pattern as the main bot.
+    """
+    tech_score = technical_result.get("score", 0.0)
+    poly_score = poly_result.get("score", 0.0)
+    poly_conf = poly_result.get("confidence", 0.0)
+
+    blended = 0.6 * tech_score + 0.15 * volume_score + 0.25 * (poly_score * poly_conf)
+    blended = max(-1.0, min(1.0, blended))
+
+    if blended >= MIN_CONFIDENCE_TO_ENTER:
+        direction = "long"
+    elif blended <= -MIN_CONFIDENCE_TO_ENTER:
+        direction = "short"
+    else:
+        direction = "neutral"
+
+    return {"direction": direction, "score": blended, "atr": technical_result.get("atr", 0.0),
+            "close": technical_result.get("close", 0.0)}
+
+
+def should_hourly_cutoff(hours_open: float, roi_pct: float, last_hour_checked: int) -> tuple[bool, int]:
+    """True (and the hour-mark that triggered it) if the position has just
+    crossed a new full-hour mark since open AND its ROI is still <=
+    HOURLY_CUTOFF_PCT at that moment -- checked once per hour boundary, not
+    continuously, so a trade already green at hour 1 isn't re-punished for a
+    dip at hour 1.5. Returns (should_close, updated_last_hour_checked) --
+    callers persist the second value on the trade even when not closing, so
+    the SAME hour mark isn't evaluated twice.
+    """
+    current_mark = int(hours_open)
+    if current_mark <= last_hour_checked or current_mark < 1:
+        return False, last_hour_checked
+    return (roi_pct <= HOURLY_CUTOFF_PCT), current_mark
+
+
+def roi_pct(unrealized_pnl: float, margin: float) -> float:
+    if margin <= 0:
+        return 0.0
+    return unrealized_pnl / margin * 100.0
+
+
+class AggressiveBTCStrategy:
+    def __init__(self, client: BybitClient, state: StateStore, notifier: Notifier,
+                 poly_signal: PolymarketSignal):
+        self.client = client
+        self.state = state
+        self.notifier = notifier
+        self.poly_signal = poly_signal
+
+    # -- signal ---------------------------------------------------------
+    def get_signal(self) -> dict:
+        candles = self.client.get_klines(SYMBOL, TIMEFRAME, limit=200)
+        tech_result = technical.score_timeframe(candles, TECH_CFG)
+        vol_score = technical.volume_score(candles)
+        poly_result = self.poly_signal.score(SYMBOL)
+        return compute_signal(tech_result, vol_score, poly_result)
+
+    # -- entry ---------------------------------------------------------
+    def try_enter(self):
+        if self.state.get_trade(SYMBOL) is not None:
+            return
+
+        signal = self.get_signal()
+        if signal["direction"] == "neutral" or signal["atr"] <= 0 or signal["close"] <= 0:
+            return
+
+        equity = self.client.get_equity_usdt()
+        margin = equity * (MARGIN_PCT_OF_EQUITY / 100.0)
+        available = self.client.get_available_balance_usdt()
+        if available is not None:
+            margin = min(margin, available)
+        if margin <= 0:
+            return
+
+        atr_pct = signal["atr"] / signal["close"] * 100.0
+        leverage = compute_leverage(atr_pct)
+
+        inst = self.client.get_instrument_info(SYMBOL)
+        leverage = min(leverage, inst.max_leverage)
+
+        side = signal["direction"]
+        entry_price = self.client.get_last_price(SYMBOL)
+        prices = compute_tp_sl_prices(entry_price, side, leverage)
+
+        sizing = compute_qty_fixed_margin(
+            margin=margin, leverage=leverage, entry_price=entry_price,
+            qty_step=inst.qty_step, min_qty=inst.min_qty, min_notional=MIN_ORDER_NOTIONAL_USDT,
+        )
+        if not sizing.ok:
+            logger.info("aggressive_btc: skip entry, %s", sizing.reason)
+            return
+
+        qty = self.client.round_qty(SYMBOL, sizing.qty)
+        sl_price = self.client.round_price(SYMBOL, prices["sl"])
+        tp_price = self.client.round_price(SYMBOL, prices["tp"])
+
+        try:
+            self.client.set_leverage(SYMBOL, leverage)
+            self.client.open_position(SYMBOL, side, qty, stop_loss=sl_price, take_profit=tp_price)
+        except BybitAPIError as exc:
+            logger.error("aggressive_btc: failed to open position: %s", exc)
+            return
+
+        # Same safety-first pattern as the main bot: verify SL/TP actually
+        # attached (Bybit can silently drop them even when the base order
+        # fills) -- close immediately rather than ever hold an unprotected
+        # leveraged position.
+        exchange_position = self.client.get_position(SYMBOL)
+        attached = bool(exchange_position) and exchange_position["stop_loss"] > 0 and exchange_position["take_profit"] > 0
+        if not attached:
+            logger.critical("aggressive_btc: %s opened with no protective SL/TP -- closing immediately", SYMBOL)
+            try:
+                self.client.close_position(SYMBOL, side, qty)
+            except BybitAPIError as exc:
+                logger.critical("aggressive_btc: COULD NOT CLOSE UNPROTECTED POSITION -- MANUAL ACTION REQUIRED: %s", exc)
+            self.notifier.send(f"[긴급] aggressive_btc: {SYMBOL} SL/TP 설정 실패 - 긴급 청산 시도. Bybit 앱에서 직접 확인하세요.")
+            return
+
+        trade = {
+            "symbol": SYMBOL, "side": side, "entry_price": entry_price, "qty": qty,
+            "margin": margin, "leverage": leverage, "current_sl": sl_price, "current_tp": tp_price,
+            "opened_at": time.time(), "last_hour_checked": 0,
+        }
+        self.state.set_trade(SYMBOL, trade)
+        msg = (f"[aggressive_btc 진입] {SYMBOL} {side.upper()} qty={qty} entry~{entry_price:.2f} "
+               f"SL={sl_price:.2f} TP={tp_price:.2f} lev={leverage:.1f}x score={signal['score']:+.2f}")
+        logger.info(msg)
+        self.notifier.send(msg)
+
+    # -- management ---------------------------------------------------------
+    def manage_open_position(self):
+        trade = self.state.get_trade(SYMBOL)
+        if trade is None:
+            return
+
+        exchange_position = self.client.get_position(SYMBOL)
+        if exchange_position is None:
+            # SL or TP already fired on the exchange side -- nothing left to
+            # close, just settle locally.
+            self._close_and_settle(trade, "sl_tp_hit", already_closed=True)
+            return
+
+        hours_open = (time.time() - trade["opened_at"]) / 3600.0
+        current_roi = roi_pct(exchange_position["unrealized_pnl"], trade["margin"])
+        should_close, new_mark = should_hourly_cutoff(hours_open, current_roi, trade["last_hour_checked"])
+        trade["last_hour_checked"] = new_mark
+        if should_close:
+            logger.info("aggressive_btc: hourly cutoff at hour %d, ROI=%.2f%% still negative -- closing", new_mark, current_roi)
+            self._close_and_settle(trade, "hourly_cutoff")
+            return
+
+        self.state.set_trade(SYMBOL, trade)
+
+    def _close_and_settle(self, trade: dict, reason: str, already_closed: bool = False):
+        if not already_closed:
+            try:
+                close_qty = self.client.round_qty(SYMBOL, trade["qty"])
+                self.client.close_position(SYMBOL, trade["side"], close_qty)
+            except BybitAPIError as exc:
+                logger.error("aggressive_btc: failed to close %s: %s", SYMBOL, exc)
+                return
+
+        closed = self.client.get_closed_pnl(SYMBOL)
+        if closed and closed["updated_time_ms"] / 1000.0 >= trade["opened_at"]:
+            pnl = closed["closed_pnl"]
+            pnl_is_estimate = False
+        else:
+            try:
+                exit_price = self.client.get_last_price(SYMBOL)
+            except BybitAPIError:
+                exit_price = trade["entry_price"]
+            if trade["side"] == "long":
+                pnl = (exit_price - trade["entry_price"]) * trade["qty"]
+            else:
+                pnl = (trade["entry_price"] - exit_price) * trade["qty"]
+            pnl_is_estimate = True
+
+        self.state.set_trade(SYMBOL, None)
+        self.state.record_closed_trade({
+            "symbol": SYMBOL, "side": trade["side"], "entry_price": trade["entry_price"],
+            "qty": trade["qty"], "pnl": pnl, "reason": reason, "pnl_is_estimate": pnl_is_estimate,
+            "leverage": trade["leverage"], "closed_at": time.time(),
+        })
+        est_tag = " (est.)" if pnl_is_estimate else ""
+        msg = f"[aggressive_btc 종료:{reason}] {SYMBOL} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
+        logger.info(msg)
+        self.notifier.send(msg)
+
+    # -- loop ---------------------------------------------------------
+    def tick(self):
+        if self.state.get_trade(SYMBOL) is not None:
+            self.manage_open_position()
+        else:
+            self.try_enter()
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    cfg = load_config()
+    secrets: Secrets = cfg.secrets
+
+    mode = "TESTNET (모의투자)" if TESTNET else "LIVE (실거래, 실제 자금 사용)"
+    logger.warning("aggressive_btc starting | mode=%s | symbol=%s | target=+%.0f%% SL=-%.0f%% "
+                    "leverage=[%.0f-%.0f]x cap=%.0fx margin=%.0f%%",
+                    mode, SYMBOL, TARGET_PCT, STOP_LOSS_PCT, MIN_LEVERAGE, MAX_LEVERAGE,
+                    LEVERAGE_HARD_CAP, MARGIN_PCT_OF_EQUITY)
+
+    client = BybitClient(
+        api_key=secrets.bybit_api_key, api_secret=secrets.bybit_api_secret,
+        testnet=TESTNET, category="linear",
+    )
+    state = StateStore(state_path())
+    notifier = Notifier(secrets.telegram_bot_token, secrets.telegram_chat_id)
+    poly_signal = PolymarketSignal(POLYMARKET_CFG)
+    strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal)
+
+    notifier.send(f"aggressive_btc 시작됨 - {mode} - {SYMBOL} 단독, 목표 +{TARGET_PCT:.0f}% / 손절 -{STOP_LOSS_PCT:.0f}%")
+
+    while True:
+        loop_start = time.time()
+        try:
+            strategy.tick()
+        except Exception:
+            logger.exception("aggressive_btc: unhandled error in main loop tick")
+        elapsed = time.time() - loop_start
+        time.sleep(max(1.0, POLL_SEC - elapsed))
+
+
+if __name__ == "__main__":
+    main()
