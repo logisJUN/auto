@@ -59,7 +59,12 @@ MARGIN_PCT_OF_EQUITY = 50.0     # % of equity used as margin per trade
 MIN_LEVERAGE = 6.0
 MAX_LEVERAGE = 24.0
 LEVERAGE_HARD_CAP = 25.0        # never exceeded regardless of volatility
-MIN_CONFIDENCE_TO_ENTER = 0.5   # |blended score| needed to call it "강세"
+MIN_CONFIDENCE_TO_ENTER = 0.4   # |blended score| needed to call it "강세"
+# Lowered from 0.5: at 0.5, 1h BTCUSDT rarely produced a strong enough blended
+# score to enter at all (observed live: a +0.34 blend sat under the bar for
+# hours) -- 0.4 trades more often while still requiring the technical score
+# alone (weight 0.75) to read roughly >=0.5 on its own if volume/polymarket
+# contribute nothing, not just noise-level confirmation.
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 
