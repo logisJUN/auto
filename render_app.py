@@ -3,8 +3,15 @@
 Render exposes exactly one HTTP port per service and does not share disks
 between services, so the trading bot and the read-only dashboard -- which are
 independent systemd services in deploy/ for a VPS -- run in the same process
-here instead: the bot loop runs in a background thread, and the Flask
-dashboard is served (via gunicorn) on the port Render assigns.
+here instead: the bot loop (bot/main.py, multi-symbol) runs in a background
+thread, and the Flask dashboard is served (via gunicorn) on the port Render
+assigns.
+
+The main bot loop only starts when MAIN_BOT_ENABLED=true -- it's off by
+default. Running both it and bot/aggressive_btc.py at once had both polling
+Bybit's kline endpoint for BTCUSDT independently and occasionally tripping
+Bybit's rate limit (ErrCode 10006); turning the main bot off avoids that and
+keeps just the one BTCUSDT strategy running.
 
 bot/aggressive_btc.py (a separate, optional BTCUSDT-only strategy, see its
 own module docstring) can run as a second background thread in this same
@@ -43,9 +50,13 @@ def _start_bot_thread():
         if _started:
             return
         _started = True
-        thread = threading.Thread(target=run_bot_forever, name="bot-loop", daemon=True)
-        thread.start()
-        logger.info("bot loop started in background thread")
+
+        if _env_bool("MAIN_BOT_ENABLED"):
+            thread = threading.Thread(target=run_bot_forever, name="bot-loop", daemon=True)
+            thread.start()
+            logger.warning("main bot loop started in background thread (MAIN_BOT_ENABLED=true)")
+        else:
+            logger.warning("main bot loop disabled (MAIN_BOT_ENABLED not set) -- not starting it")
 
         if _env_bool("AGGRESSIVE_BTC_ENABLED"):
             from bot.aggressive_btc import main as run_aggressive_btc_forever

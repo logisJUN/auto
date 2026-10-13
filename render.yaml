@@ -40,6 +40,13 @@ services:
         sync: false
       - key: EMAIL_TO
         sync: false
+      # bot/main.py: the original multi-symbol bot. Off by default (absent =
+      # false) -- running it alongside aggressive_btc.py had both polling
+      # Bybit's kline endpoint for BTCUSDT independently and occasionally
+      # tripping Bybit's rate limit. sync: false so a manual true/false set in
+      # the Render dashboard sticks instead of being reset by a blueprint sync.
+      - key: MAIN_BOT_ENABLED
+        sync: false
       # bot/aggressive_btc.py: separate, optional BTCUSDT-only strategy.
       # AGGRESSIVE_BTC_ENABLED must be explicitly "true" for it to run at
       # all -- deploying this file's changes alone never starts it. sync:
