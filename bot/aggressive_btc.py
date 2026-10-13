@@ -225,9 +225,24 @@ class AggressiveBTCStrategy:
             qty_step=inst.qty_step, min_qty=inst.min_qty, min_notional=MIN_ORDER_NOTIONAL_USDT,
         )
         if not sizing.ok:
-            logger.info("aggressive_btc: skip entry, %s", sizing.reason)
-            self.state.set_skip_reason(SYMBOL, f"주문 크기 조건 미충족 ({sizing.reason})")
-            return
+            # MARGIN_PCT_OF_EQUITY of equity alone doesn't clear the exchange's
+            # min qty / the configured min notional at this leverage -- retry
+            # with just enough margin to clear it (never more than what's
+            # actually available) instead of skipping the trade outright.
+            required_notional = max(MIN_ORDER_NOTIONAL_USDT, inst.min_qty * entry_price)
+            required_notional += inst.qty_step * entry_price  # survive compute_qty_fixed_margin's floor-down rounding
+            min_margin_needed = (required_notional / leverage) * 1.01  # small pad for float rounding
+            available_for_min = available if available is not None else equity
+            if min_margin_needed <= available_for_min:
+                margin = min_margin_needed
+                sizing = compute_qty_fixed_margin(
+                    margin=margin, leverage=leverage, entry_price=entry_price,
+                    qty_step=inst.qty_step, min_qty=inst.min_qty, min_notional=MIN_ORDER_NOTIONAL_USDT,
+                )
+            if not sizing.ok:
+                logger.info("aggressive_btc: skip entry, %s", sizing.reason)
+                self.state.set_skip_reason(SYMBOL, f"주문 크기 조건 미충족 ({sizing.reason})")
+                return
 
         qty = self.client.round_qty(SYMBOL, sizing.qty)
         sl_price = self.client.round_price(SYMBOL, prices["sl"])

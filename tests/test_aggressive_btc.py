@@ -277,6 +277,46 @@ def test_try_enter_sets_skip_reason_when_order_sizing_fails(tmp_path):
     assert "주문 크기 조건 미충족" in reason["reason"]
 
 
+def test_try_enter_bumps_up_to_the_minimum_entry_size_when_50pct_margin_is_too_small(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    # equity small enough that MARGIN_PCT_OF_EQUITY (50%) of it can't clear the
+    # 5 USDT minimum order notional at the leverage this signal implies.
+    client.get_equity_usdt.return_value = 0.5
+    client.get_available_balance_usdt.return_value = 1_000_000.0  # plenty available
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
+    trade = state.get_trade("BTCUSDT")
+    assert trade is not None
+    assert trade["margin"] > 0.25  # bumped up above the plain 50%-of-equity amount (0.25)
+    assert trade["margin"] * trade["leverage"] >= 5.0 - 1e-6  # clears MIN_ORDER_NOTIONAL_USDT
+    assert state.get_skip_reason("BTCUSDT") is None
+
+
+def test_try_enter_still_skips_if_even_the_minimum_entry_size_is_unaffordable(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 0.5
+    client.get_available_balance_usdt.return_value = 0.1  # not even enough for the minimum
+    client.get_last_price.return_value = 140.0
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    assert state.get_trade("BTCUSDT") is None
+    reason = state.get_skip_reason("BTCUSDT")
+    assert reason is not None
+    assert "주문 크기 조건 미충족" in reason["reason"]
+
+
 def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
