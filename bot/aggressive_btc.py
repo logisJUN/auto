@@ -215,6 +215,13 @@ class AggressiveBTCStrategy:
 
         inst = self.client.get_instrument_info(SYMBOL)
         leverage = min(leverage, inst.max_leverage)
+        # BybitClient.set_leverage truncates to a whole number when it talks to
+        # the exchange -- round down here too, BEFORE computing TP/SL prices,
+        # so the price targets are derived from the SAME leverage that actually
+        # ends up applied to the position. Otherwise a fractional leverage here
+        # (e.g. 21.6x) vs an integer 21x on the exchange silently shifts the
+        # realized ROI% at TP/SL away from the intended 12%/-5%.
+        leverage = float(int(leverage))
 
         side = signal["direction"]
         entry_price = self.client.get_last_price(SYMBOL)

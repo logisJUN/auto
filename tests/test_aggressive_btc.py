@@ -199,6 +199,34 @@ def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
     assert state.get_skip_reason("BTCUSDT") is None
 
 
+def test_try_enter_truncates_leverage_to_a_whole_number_before_pricing_tp_sl(tmp_path):
+    # atr_pct = 1.5/140*100 = 1.0714... -> compute_leverage gives 11.2 (fractional).
+    # Bybit's set_leverage only ever accepts a whole number, so the bot must use
+    # that same truncated 11x (not 11.2x) when it works out TP/SL, or the
+    # realized ROI% at TP/SL silently drifts from the intended 12%/-5%.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.set_leverage.assert_called_once()
+    requested_leverage = client.set_leverage.call_args[0][1]
+    assert requested_leverage == 11.0  # floor(11.2), not the fractional value
+
+    trade = state.get_trade("BTCUSDT")
+    expected = compute_tp_sl_prices(140.0, "long", 11.0)
+    assert trade["current_tp"] == round(expected["tp"], 1)
+    assert trade["current_sl"] == round(expected["sl"], 1)
+
+
 def test_try_enter_clears_a_previously_set_skip_reason_on_successful_entry(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_skip_reason("BTCUSDT", "관망 중 - 신호 약함 (stale)")
