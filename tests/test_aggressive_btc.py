@@ -204,8 +204,8 @@ def test_get_signal_wires_news_signal_into_the_blend(tmp_path, monkeypatch):
     signal = strategy.get_signal()
 
     strategy.news_signal.score_for_symbol.assert_called_once_with(aggressive_btc.SYMBOL)
-    # 0.45*0.5 + 0.15*0 + 0.10*0 + 0.30*(-1.0*1.0) = 0.225 - 0.30 = -0.075
-    assert round(signal["score"], 3) == -0.075
+    # 0.30*0.5 + 0.15*0 + 0.10*0 + 0.45*(-1.0*1.0) = 0.15 - 0.45 = -0.30
+    assert round(signal["score"], 3) == -0.30
 
 
 def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
