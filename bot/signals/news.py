@@ -41,6 +41,12 @@ SYMBOL_KEYWORDS = {
     "XRPUSDT": ["xrp", "ripple"],
     "BNBUSDT": ["bnb", "binance coin"],
     "DOGEUSDT": ["dogecoin", "doge"],
+    # SOXLUSDT is a tokenized 3x semiconductor ETF, not a coin -- relevant
+    # news is about the sector/underlying, not anything literally called "soxl".
+    "SOXLUSDT": ["semiconductor", "semiconductors", "chip stocks", "chipmaker",
+                 "nvidia", "amd", "tsmc", "intel", "qualcomm", "broadcom",
+                 "philadelphia semiconductor", "sox index", "export controls",
+                 "chip ban", "chip export"],
 }
 
 
@@ -120,6 +126,10 @@ class NewsSignal:
         self.lookback = timedelta(hours=cfg.get("lookback_hours", 12))
         self.max_articles = cfg.get("max_articles", 60)
         self.newsapi_key = newsapi_key
+        # Configurable per instance -- a second NewsSignal for a non-crypto
+        # symbol (e.g. aggressive_btc's SOXLUSDT) needs its own NewsAPI query,
+        # not this default crypto one.
+        self.newsapi_query = cfg.get("newsapi_query", "bitcoin OR ethereum OR crypto")
         self._cache_time = 0.0
         self._articles: list[dict] = []
 
@@ -129,7 +139,7 @@ class NewsSignal:
             return
         articles = _fetch_rss(self.feeds, self.lookback)
         if self.newsapi_key:
-            articles += _fetch_newsapi(self.newsapi_key, "bitcoin OR ethereum OR crypto", self.lookback)
+            articles += _fetch_newsapi(self.newsapi_key, self.newsapi_query, self.lookback)
         # dedupe by title, cap length
         seen = set()
         deduped = []

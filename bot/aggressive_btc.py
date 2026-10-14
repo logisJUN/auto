@@ -23,10 +23,12 @@ Design, as specified:
   1. 1-hour candles, target +12% ROI (on margin) per trade.
   2. Both long and short entries, whichever direction the blended signal favors.
   3. Entry signal: technical (EMA/RSI/MACD/Bollinger + volume) blended with
-     Polymarket, both computed off 1h candles for SYMBOL. Polymarket has no
-     SOXLUSDT-relevant markets (see POLYMARKET_CFG below) -- it always
-     contributes 0 for this symbol, same as for any non-BTC/ETH symbol in
-     the main bot.
+     Polymarket and general sector news, all computed off 1h candles /
+     latest headlines for SYMBOL. Polymarket has no SOXLUSDT-relevant
+     markets (see POLYMARKET_CFG below) -- it always contributes 0 for this
+     symbol, same as for any non-BTC/ETH symbol in the main bot. News (see
+     NEWS_CFG) is semiconductor-sector-specific RSS feeds + an optional
+     NewsAPI query, scored the same way as the main bot's crypto news signal.
   4. Stop-loss at -5% ROI.
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
@@ -59,6 +61,7 @@ from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.notify import Notifier
 from bot.risk.position_sizing import compute_qty_fixed_margin
 from bot.signals import technical
+from bot.signals.news import NewsSignal
 from bot.signals.polymarket import PolymarketSignal
 from bot.state import StateStore
 
@@ -80,9 +83,8 @@ LEVERAGE_HARD_CAP = 10.0        # lowered from 25.0, same reason -- never exceed
 MIN_CONFIDENCE_TO_ENTER = 0.4   # |blended score| needed to call it "강세"
 # Lowered from 0.5: at 0.5, 1h BTCUSDT rarely produced a strong enough blended
 # score to enter at all (observed live: a +0.34 blend sat under the bar for
-# hours) -- 0.4 trades more often while still requiring the technical score
-# alone (weight 0.75) to read roughly >=0.5 on its own if volume/polymarket
-# contribute nothing, not just noise-level confirmation.
+# hours) -- 0.4 trades more often while still requiring a real move, not
+# just noise-level confirmation, from whichever components are active.
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 
@@ -98,6 +100,25 @@ POLYMARKET_CFG = {
     # bot, instead of letting unrelated bitcoin/macro sentiment push this
     # signal's direction.
     "relevant_symbols": [],
+}
+
+# Unlike Polymarket (no semiconductor-relevant prediction markets exist),
+# general news is genuinely informative for SOXLUSDT -- sector-moving events
+# (export-control changes, a major chipmaker's earnings, Fed rate decisions)
+# show up in headlines well before they fully show up in 1h technical
+# indicators. Free RSS only (no mandatory paid dependency), same pattern as
+# the main bot's news signal; NEWSAPI_KEY (if set) supplements these with a
+# semiconductor-specific query instead of the main bot's crypto one.
+NEWS_CFG = {
+    "feeds": [
+        "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # CNBC Technology
+        "https://www.investing.com/rss/news_25.rss",              # Investing.com stock market news
+        "https://www.marketwatch.com/rss/topstories",             # MarketWatch top stories
+    ],
+    "newsapi_query": "semiconductor OR chip OR chips OR Nvidia OR AMD OR TSMC OR Intel",
+    "refresh_minutes": 15,
+    "lookback_hours": 12,
+    "max_articles": 60,
 }
 
 
@@ -136,27 +157,36 @@ def compute_tp_sl_prices(entry_price: float, side: str, leverage: float,
     return {"tp": entry_price * (1 - target_move), "sl": entry_price * (1 + stop_move)}
 
 
-def compute_signal(technical_result: dict, volume_score: float, poly_result: dict) -> dict:
+def compute_signal(technical_result: dict, volume_score: float, poly_result: dict,
+                    news_result: dict | None = None) -> dict:
     """Blends the 1h technical score (EMA trend + RSI momentum + MACD +
-    Bollinger, from technical.score_timeframe) with volume confirmation and
+    Bollinger, from technical.score_timeframe) with volume confirmation,
     Polymarket sentiment (currently always 0 for SOXLUSDT -- see
-    POLYMARKET_CFG's empty relevant_symbols) into one directional call --
-    both long and short are eligible, whichever the blend favors. Polymarket
-    only counts when it actually found something relevant (its own
-    confidence), same pattern as the main bot.
+    POLYMARKET_CFG's empty relevant_symbols), and general sector news into
+    one directional call -- both long and short are eligible, whichever the
+    blend favors. Polymarket and news each only count when they actually
+    found something relevant (their own confidence), same pattern as the
+    main bot.
 
-    Polymarket is weighted low (0.10) relative to technical (0.75): its
-    crypto-relevant markets are mostly weeks-to-months-out questions (rate
-    decisions, year-end price targets), which has little theoretical
-    connection to a 1-hour directional call, and in practice its own
-    confidence is usually 0 (no relevant markets found) anyway -- kept as a
-    minor input rather than a primary one.
+    Weights: technical 0.60, volume 0.15, polymarket 0.10, news 0.15.
+    Polymarket stays low (and inert for SOXLUSDT): its crypto-relevant
+    markets have nothing to do with semiconductors. News is weighted higher
+    than for a pure-crypto symbol -- sector-moving events (export-control
+    changes, a major chipmaker's earnings, Fed rate decisions) tend to show
+    up in headlines before they fully show up in 1h technical indicators,
+    unlike Polymarket's weeks-to-months-out questions. Technical is lowered
+    from 0.75 to 0.60 to make room without that news weight coming at
+    volume's expense.
     """
+    news_result = news_result or {}
     tech_score = technical_result.get("score", 0.0)
     poly_score = poly_result.get("score", 0.0)
     poly_conf = poly_result.get("confidence", 0.0)
+    news_score = news_result.get("score", 0.0)
+    news_conf = news_result.get("confidence", 0.0)
 
-    blended = 0.75 * tech_score + 0.15 * volume_score + 0.10 * (poly_score * poly_conf)
+    blended = (0.60 * tech_score + 0.15 * volume_score
+               + 0.10 * (poly_score * poly_conf) + 0.15 * (news_score * news_conf))
     blended = max(-1.0, min(1.0, blended))
 
     if blended >= MIN_CONFIDENCE_TO_ENTER:
@@ -169,7 +199,8 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
     return {"direction": direction, "score": blended, "atr": technical_result.get("atr", 0.0),
             "close": technical_result.get("close", 0.0),
             "components": {"technical": tech_score, "volume": volume_score,
-                            "polymarket": poly_score, "polymarket_confidence": poly_conf}}
+                            "polymarket": poly_score, "polymarket_confidence": poly_conf,
+                            "news": news_score, "news_confidence": news_conf}}
 
 
 def should_hourly_cutoff(hours_open: float, roi_pct: float, last_hour_checked: int) -> tuple[bool, int]:
@@ -195,11 +226,12 @@ def roi_pct(unrealized_pnl: float, margin: float) -> float:
 
 class AggressiveBTCStrategy:
     def __init__(self, client: BybitClient, state: StateStore, notifier: Notifier,
-                 poly_signal: PolymarketSignal):
+                 poly_signal: PolymarketSignal, news_signal: NewsSignal):
         self.client = client
         self.state = state
         self.notifier = notifier
         self.poly_signal = poly_signal
+        self.news_signal = news_signal
 
     # -- signal ---------------------------------------------------------
     def get_signal(self) -> dict:
@@ -207,13 +239,15 @@ class AggressiveBTCStrategy:
         tech_result = technical.score_timeframe(candles, TECH_CFG)
         vol_score = technical.volume_score(candles)
         poly_result = self.poly_signal.score(SYMBOL)
-        return compute_signal(tech_result, vol_score, poly_result)
+        news_result = self.news_signal.score_for_symbol(SYMBOL)
+        return compute_signal(tech_result, vol_score, poly_result, news_result)
 
     # -- entry ---------------------------------------------------------
     def _format_signal_breakdown(self, signal: dict) -> str:
         c = signal.get("components", {})
         return (f"T:{c.get('technical', 0.0):+.2f} V:{c.get('volume', 0.0):+.2f} "
                 f"P:{c.get('polymarket', 0.0):+.2f}(conf {c.get('polymarket_confidence', 0.0):.2f}) "
+                f"N:{c.get('news', 0.0):+.2f}(conf {c.get('news_confidence', 0.0):.2f}) "
                 f"-> blended={signal['score']:+.2f}")
 
     def try_enter(self):
@@ -431,7 +465,8 @@ def main():
     client = BybitClient(api_key=api_key, api_secret=api_secret, testnet=TESTNET, category="linear")
     state = StateStore(state_path())
     poly_signal = PolymarketSignal(POLYMARKET_CFG)
-    strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal)
+    news_signal = NewsSignal(NEWS_CFG, secrets.newsapi_key)
+    strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal)
 
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {SYMBOL} 단독, 목표 +{TARGET_PCT:.0f}% / 손절 -{STOP_LOSS_PCT:.0f}%")
 

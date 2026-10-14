@@ -110,9 +110,19 @@ def test_signal_ignores_polymarket_when_its_confidence_is_zero():
 def test_signal_includes_component_breakdown_for_display():
     tech = {"score": 0.41, "atr": 1.0, "close": 100.0}
     poly = {"score": 0.2, "confidence": 0.5}
-    result = compute_signal(tech, volume_score=0.1, poly_result=poly)
+    news = {"score": -0.3, "confidence": 0.4}
+    result = compute_signal(tech, volume_score=0.1, poly_result=poly, news_result=news)
     assert result["components"] == {"technical": 0.41, "volume": 0.1,
-                                     "polymarket": 0.2, "polymarket_confidence": 0.5}
+                                     "polymarket": 0.2, "polymarket_confidence": 0.5,
+                                     "news": -0.3, "news_confidence": 0.4}
+
+
+def test_signal_news_defaults_to_zero_when_not_provided():
+    tech = {"score": 0.41, "atr": 1.0, "close": 100.0}
+    poly = {"score": 0.0, "confidence": 0.0}
+    result = compute_signal(tech, volume_score=0.0, poly_result=poly)
+    assert result["components"]["news"] == 0.0
+    assert result["components"]["news_confidence"] == 0.0
 
 
 # -- roi_pct / should_hourly_cutoff ---------------------------------------------------------
@@ -175,7 +185,27 @@ def _make_strategy(tmp_path):
     client.round_qty.side_effect = lambda symbol, qty: round(qty, 3)
     poly_signal = MagicMock()
     poly_signal.score.return_value = {"score": 0.0, "confidence": 0.0}
-    return AggressiveBTCStrategy(client, state, notifier, poly_signal), state, client, poly_signal
+    news_signal = MagicMock()
+    news_signal.score_for_symbol.return_value = {"score": 0.0, "confidence": 0.0}
+    return (AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal),
+            state, client, poly_signal)
+
+
+def test_get_signal_wires_news_signal_into_the_blend(tmp_path, monkeypatch):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    client.get_klines.return_value = [{"ts": 1, "open": 1, "high": 1, "low": 1,
+                                        "close": 100.0, "volume": 1}]
+    monkeypatch.setattr(aggressive_btc.technical, "score_timeframe",
+                         lambda candles, cfg: {"score": 0.5, "atr": 1.0, "close": 100.0})
+    monkeypatch.setattr(aggressive_btc.technical, "volume_score", lambda candles: 0.0)
+    poly_signal.score.return_value = {"score": 0.0, "confidence": 0.0}
+    strategy.news_signal.score_for_symbol.return_value = {"score": -1.0, "confidence": 1.0}
+
+    signal = strategy.get_signal()
+
+    strategy.news_signal.score_for_symbol.assert_called_once_with(aggressive_btc.SYMBOL)
+    # 0.60*0.5 + 0.15*0 + 0.10*0 + 0.15*(-1.0*1.0) = 0.30 - 0.15 = 0.15
+    assert round(signal["score"], 2) == 0.15
 
 
 def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
