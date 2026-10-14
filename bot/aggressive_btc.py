@@ -1,4 +1,5 @@
-"""Standalone BTCUSDT-only aggressive scalp strategy.
+"""Standalone single-symbol aggressive scalp strategy, currently pointed at
+SOXLUSDT (switched from BTCUSDT -- see SYMBOL below).
 
 Deliberately SEPARATE from bot/strategy.py (the main, conservative
 multi-symbol system this whole codebase was built around) -- different risk
@@ -6,26 +7,43 @@ philosophy entirely, so it gets its own state file, own main loop, own entry
 point (`python -m bot.aggressive_btc`), and never touches the main bot's
 state or open positions. The two can run side by side without interfering.
 
+SOXLUSDT is NOT a plain coin -- it's a tokenized 3x-leveraged semiconductor
+ETF (the main bot's config.yaml excludes it from its own universe scan for
+exactly this reason: realized PNL on this kind of embedded-leverage token has
+been observed live running ~3x what entry/exit price * qty * leverage alone
+would imply). Exchange leverage here is capped much lower than the original
+BTC design (10x, not 24x) specifically to account for that -- see
+MAX_LEVERAGE/LEVERAGE_HARD_CAP below. The TP/SL % math (ROI% = price_move% *
+leverage) still assumes a plain linear instrument; it has NOT been verified
+against SOXLUSDT's actual embedded-leverage PNL behavior, so the realized
+ROI% at TP/SL may still diverge from the configured 12%/-5% target more than
+it does for BTCUSDT.
+
 Design, as specified:
   1. 1-hour candles, target +12% ROI (on margin) per trade.
   2. Both long and short entries, whichever direction the blended signal favors.
   3. Entry signal: technical (EMA/RSI/MACD/Bollinger + volume) blended with
-     Polymarket, both computed off 1h BTCUSDT candles.
+     Polymarket, both computed off 1h candles for SYMBOL. Polymarket has no
+     SOXLUSDT-relevant markets (see POLYMARKET_CFG below) -- it always
+     contributes 0 for this symbol, same as for any non-BTC/ETH symbol in
+     the main bot.
   4. Stop-loss at -5% ROI.
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
   6. 50% of equity used as margin per trade.
   7. Leverage auto-sized so the 12% target is roughly reachable within an
-     hour given BTC's recent realized volatility -- clipped to [6x, 24x],
-     hard-capped at 25x no matter how low volatility reads (the real safety
-     backstop: a calm stretch must never push leverage past this, since a
-     sudden move hits hardest exactly when leverage was raised to compensate
-     for the apparent calm).
+     hour given the symbol's recent realized volatility -- clipped to
+     [6x, 10x], hard-capped at 10x no matter how low volatility reads (the
+     real safety backstop: a calm stretch must never push leverage past
+     this, since a sudden move hits hardest exactly when leverage was
+     raised to compensate for the apparent calm -- lowered from BTC's
+     24x/25x specifically because SOXLUSDT already carries embedded 3x
+     leverage from the underlying ETF).
 
 ================================================================================
 TESTNET below is the ONLY thing that needs to change to go live. Defaults to
 True. Flipping it to False points this module at the real account -- nothing
-else about its risk profile (the 25x cap, -5% SL, hourly loss-cutoff, 50%
+else about its risk profile (the 10x cap, -5% SL, hourly loss-cutoff, 50%
 margin-per-trade) changes between test and live; going live only changes
 which account's money is at risk.
 ================================================================================
@@ -50,15 +68,15 @@ logger = logging.getLogger("bot.aggressive_btc")
 TESTNET = False   # <-- flip this one line to go live. See module docstring.
 # ==============================================================================
 
-SYMBOL = "BTCUSDT"
+SYMBOL = "SOXLUSDT"             # switched from BTCUSDT -- see module docstring
 TIMEFRAME = "60"                # Bybit kline interval string for 1-hour candles
 TARGET_PCT = 12.0               # take-profit, % ROI on margin
 STOP_LOSS_PCT = 5.0             # stop-loss, % ROI on margin
 HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
 MARGIN_PCT_OF_EQUITY = 50.0     # % of equity used as margin per trade
 MIN_LEVERAGE = 6.0
-MAX_LEVERAGE = 24.0
-LEVERAGE_HARD_CAP = 25.0        # never exceeded regardless of volatility
+MAX_LEVERAGE = 10.0             # lowered from 24.0: SOXLUSDT already carries embedded 3x leverage (see module docstring)
+LEVERAGE_HARD_CAP = 10.0        # lowered from 25.0, same reason -- never exceeded regardless of volatility
 MIN_CONFIDENCE_TO_ENTER = 0.4   # |blended score| needed to call it "강세"
 # Lowered from 0.5: at 0.5, 1h BTCUSDT rarely produced a strong enough blended
 # score to enter at all (observed live: a +0.34 blend sat under the bar for
@@ -74,7 +92,12 @@ POLYMARKET_CFG = {
     "keywords": ["bitcoin", "crypto", "fed ", "interest rate", "recession"],
     "refresh_minutes": 15,
     "max_markets": 40,
-    "relevant_symbols": ["BTCUSDT"],
+    # No markets here are about semiconductors/SOXL -- leaving SYMBOL out of
+    # relevant_symbols makes PolymarketSignal.score always return 0
+    # score/confidence for it, same as any non-BTC/ETH symbol in the main
+    # bot, instead of letting unrelated bitcoin/macro sentiment push this
+    # signal's direction.
+    "relevant_symbols": [],
 }
 
 
@@ -116,7 +139,8 @@ def compute_tp_sl_prices(entry_price: float, side: str, leverage: float,
 def compute_signal(technical_result: dict, volume_score: float, poly_result: dict) -> dict:
     """Blends the 1h technical score (EMA trend + RSI momentum + MACD +
     Bollinger, from technical.score_timeframe) with volume confirmation and
-    Polymarket's BTCUSDT-relevant sentiment into one directional call --
+    Polymarket sentiment (currently always 0 for SOXLUSDT -- see
+    POLYMARKET_CFG's empty relevant_symbols) into one directional call --
     both long and short are eligible, whichever the blend favors. Polymarket
     only counts when it actually found something relevant (its own
     confidence), same pattern as the main bot.

@@ -1,14 +1,15 @@
-"""bot/aggressive_btc.py: a standalone, SEPARATE BTCUSDT-only aggressive
-strategy (12% target / 1h, -5% SL, hourly negative-ROI cutoff, 6-24x
-leverage hard-capped at 25x, 50% margin per trade). Deliberately isolated
-from the main bot/strategy.py -- these tests cover its own pure logic and
-its own strategy class in isolation.
+"""bot/aggressive_btc.py: a standalone, SEPARATE single-symbol aggressive
+strategy (currently SOXLUSDT; 12% target / 1h, -5% SL, hourly negative-ROI
+cutoff, 6-10x leverage hard-capped at 10x, 50% margin per trade). Deliberately
+isolated from the main bot/strategy.py -- these tests cover its own pure
+logic and its own strategy class in isolation.
 """
 import time
 from unittest.mock import MagicMock
 
 import bot.aggressive_btc as aggressive_btc
 from bot.aggressive_btc import (
+    SYMBOL,
     AggressiveBTCStrategy,
     Secrets,
     _resolve_credentials,
@@ -26,8 +27,8 @@ from bot.state import StateStore
 # -- compute_leverage ---------------------------------------------------------
 
 def test_leverage_scales_up_when_recent_volatility_is_low():
-    # low atr_pct -> required (12/atr) leverage would be huge -> clipped to max 24
-    assert compute_leverage(atr_pct=0.1) == 24.0
+    # low atr_pct -> required (12/atr) leverage would be huge -> clipped to max 10
+    assert compute_leverage(atr_pct=0.1) == 10.0
 
 
 def test_leverage_scales_down_when_recent_volatility_is_high():
@@ -36,8 +37,8 @@ def test_leverage_scales_down_when_recent_volatility_is_high():
 
 
 def test_leverage_exact_value_in_the_middle_of_the_range():
-    # required = 12/1.0 = 12, within [6,24] -- used as-is
-    assert compute_leverage(atr_pct=1.0) == 12.0
+    # required = 12/1.5 = 8, within [6,10] -- used as-is
+    assert compute_leverage(atr_pct=1.5) == 8.0
 
 
 def test_leverage_defaults_to_min_when_atr_is_zero_or_negative():
@@ -185,33 +186,34 @@ def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
     client.get_last_price.return_value = 140.0
     client.open_position.return_value = {}
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
 
     strategy.try_enter()
 
     client.open_position.assert_called_once()
-    trade = state.get_trade("BTCUSDT")
+    trade = state.get_trade(SYMBOL)
     assert trade is not None
     assert trade["side"] == "long"
     assert trade["margin"] == 50.0  # 50% of 100 equity
-    assert state.get_skip_reason("BTCUSDT") is None
+    assert state.get_skip_reason(SYMBOL) is None
 
 
 def test_try_enter_truncates_leverage_to_a_whole_number_before_pricing_tp_sl(tmp_path):
-    # atr_pct = 1.5/140*100 = 1.0714... -> compute_leverage gives 11.2 (fractional).
+    # atr_pct = 2.24/140*100 = 1.6 -> compute_leverage gives 7.5 (fractional,
+    # within the [6,10] range so it isn't clipped to a whole number by chance).
     # Bybit's set_leverage only ever accepts a whole number, so the bot must use
-    # that same truncated 11x (not 11.2x) when it works out TP/SL, or the
+    # that same truncated 7x (not 7.5x) when it works out TP/SL, or the
     # realized ROI% at TP/SL silently drifts from the intended 12%/-5%.
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 2.24, "close": 140.0}
     client.get_equity_usdt.return_value = 100.0
     client.get_available_balance_usdt.return_value = 1_000_000.0
     client.get_last_price.return_value = 140.0
     client.open_position.return_value = {}
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
 
@@ -219,30 +221,30 @@ def test_try_enter_truncates_leverage_to_a_whole_number_before_pricing_tp_sl(tmp
 
     client.set_leverage.assert_called_once()
     requested_leverage = client.set_leverage.call_args[0][1]
-    assert requested_leverage == 11.0  # floor(11.2), not the fractional value
+    assert requested_leverage == 7.0  # floor(7.5), not the fractional value
 
-    trade = state.get_trade("BTCUSDT")
-    expected = compute_tp_sl_prices(140.0, "long", 11.0)
+    trade = state.get_trade(SYMBOL)
+    expected = compute_tp_sl_prices(140.0, "long", 7.0)
     assert trade["current_tp"] == round(expected["tp"], 1)
     assert trade["current_sl"] == round(expected["sl"], 1)
 
 
 def test_try_enter_clears_a_previously_set_skip_reason_on_successful_entry(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    state.set_skip_reason("BTCUSDT", "관망 중 - 신호 약함 (stale)")
+    state.set_skip_reason(SYMBOL, "관망 중 - 신호 약함 (stale)")
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
     client.get_equity_usdt.return_value = 100.0
     client.get_available_balance_usdt.return_value = 1_000_000.0
     client.get_last_price.return_value = 140.0
     client.open_position.return_value = {}
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
 
     strategy.try_enter()
 
-    assert state.get_skip_reason("BTCUSDT") is None
+    assert state.get_skip_reason(SYMBOL) is None
 
 
 def test_try_enter_skips_when_signal_is_neutral(tmp_path):
@@ -256,8 +258,8 @@ def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     strategy.try_enter()
 
     client.open_position.assert_not_called()
-    assert state.get_trade("BTCUSDT") is None
-    reason = state.get_skip_reason("BTCUSDT")
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "관망 중" in reason["reason"]
     assert "T:+0.10" in reason["reason"]
@@ -273,7 +275,7 @@ def test_try_enter_sets_skip_reason_when_no_margin_available(tmp_path):
     strategy.try_enter()
 
     client.open_position.assert_not_called()
-    reason = state.get_skip_reason("BTCUSDT")
+    reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "여유 증거금 없음" in reason["reason"]
 
@@ -300,7 +302,7 @@ def test_try_enter_sets_skip_reason_when_order_sizing_fails(tmp_path):
         agg_mod.compute_qty_fixed_margin = original_compute
 
     client.open_position.assert_not_called()
-    reason = state.get_skip_reason("BTCUSDT")
+    reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "주문 크기 조건 미충족" in reason["reason"]
 
@@ -315,18 +317,18 @@ def test_try_enter_bumps_up_to_the_minimum_entry_size_when_50pct_margin_is_too_s
     client.get_last_price.return_value = 140.0
     client.open_position.return_value = {}
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
 
     strategy.try_enter()
 
     client.open_position.assert_called_once()
-    trade = state.get_trade("BTCUSDT")
+    trade = state.get_trade(SYMBOL)
     assert trade is not None
     assert trade["margin"] > 0.25  # bumped up above the plain 50%-of-equity amount (0.25)
     assert trade["margin"] * trade["leverage"] >= 5.0 - 1e-6  # clears MIN_ORDER_NOTIONAL_USDT
-    assert state.get_skip_reason("BTCUSDT") is None
+    assert state.get_skip_reason(SYMBOL) is None
 
 
 def test_try_enter_still_skips_if_even_the_minimum_entry_size_is_unaffordable(tmp_path):
@@ -339,8 +341,8 @@ def test_try_enter_still_skips_if_even_the_minimum_entry_size_is_unaffordable(tm
     strategy.try_enter()
 
     client.open_position.assert_not_called()
-    assert state.get_trade("BTCUSDT") is None
-    reason = state.get_skip_reason("BTCUSDT")
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "주문 크기 조건 미충족" in reason["reason"]
 
@@ -353,28 +355,28 @@ def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
     client.get_last_price.return_value = 140.0
     client.open_position.return_value = {}
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 0.0, "take_profit": 0.0,  # never attached
     }
 
     strategy.try_enter()
 
     client.close_position.assert_called_once()
-    assert state.get_trade("BTCUSDT") is None
-    reason = state.get_skip_reason("BTCUSDT")
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "SL/TP 설정 실패" in reason["reason"]
 
 
 def test_manage_open_position_closes_on_hourly_cutoff(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    state.set_trade("BTCUSDT", {
-        "symbol": "BTCUSDT", "side": "long", "entry_price": 100.0, "qty": 1.0,
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
         "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 101.0,
         "opened_at": time.time() - 3700, "last_hour_checked": 0,  # just past 1h
     })
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
         "unrealized_pnl": -1.0, "unrealized_pnl": -1.0, "position_idx": 0,
         "stop_loss": 90.0, "take_profit": 101.0,
     }
@@ -385,35 +387,35 @@ def test_manage_open_position_closes_on_hourly_cutoff(tmp_path):
     strategy.manage_open_position()
 
     client.close_position.assert_called_once()
-    assert state.get_trade("BTCUSDT") is None
+    assert state.get_trade(SYMBOL) is None
     history = state.snapshot()["history"]
     assert history[-1]["reason"] == "hourly_cutoff"
 
 
 def test_manage_open_position_keeps_a_profitable_trade_open_past_the_hour(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    state.set_trade("BTCUSDT", {
-        "symbol": "BTCUSDT", "side": "long", "entry_price": 100.0, "qty": 1.0,
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
         "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 101.0,
         "opened_at": time.time() - 3700, "last_hour_checked": 0,
     })
     client.get_position.return_value = {
-        "symbol": "BTCUSDT", "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
         "unrealized_pnl": 2.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 101.0,
     }
 
     strategy.manage_open_position()
 
     client.close_position.assert_not_called()
-    trade = state.get_trade("BTCUSDT")
+    trade = state.get_trade(SYMBOL)
     assert trade is not None
     assert trade["last_hour_checked"] == 1
 
 
 def test_manage_open_position_settles_when_sl_tp_already_closed_it(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    state.set_trade("BTCUSDT", {
-        "symbol": "BTCUSDT", "side": "long", "entry_price": 100.0, "qty": 1.0,
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
         "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 101.0,
         "opened_at": time.time() - 60, "last_hour_checked": 0,
     })
@@ -425,15 +427,15 @@ def test_manage_open_position_settles_when_sl_tp_already_closed_it(tmp_path):
     strategy.manage_open_position()
 
     client.close_position.assert_not_called()  # nothing left to close
-    assert state.get_trade("BTCUSDT") is None
+    assert state.get_trade(SYMBOL) is None
     history = state.snapshot()["history"]
     assert history[-1]["pnl"] == 6.0
 
 
 def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
-    state.set_trade("BTCUSDT", {
-        "symbol": "BTCUSDT", "side": "long", "entry_price": 100.0, "qty": 1.0,
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
         "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 101.0,
         "opened_at": time.time(), "last_hour_checked": 0,
     })

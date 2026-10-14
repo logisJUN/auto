@@ -11,13 +11,14 @@ The main bot loop only starts when MAIN_BOT_ENABLED=true -- it's off by
 default. Running both it and bot/aggressive_btc.py at once had both polling
 Bybit's kline endpoint for BTCUSDT independently and occasionally tripping
 Bybit's rate limit (ErrCode 10006); turning the main bot off avoids that and
-keeps just the one BTCUSDT strategy running.
+keeps just the one aggressive_btc strategy running.
 
-bot/aggressive_btc.py (a separate, optional BTCUSDT-only strategy, see its
-own module docstring) can run as a second background thread in this same
-process, gated behind AGGRESSIVE_BTC_ENABLED=true so that deploying updated
-code alone can never start it by surprise -- it has to be deliberately
-turned on via an env var, same as any other opt-in here.
+bot/aggressive_btc.py (a separate, optional single-symbol strategy --
+currently SOXLUSDT, see its own module docstring) can run as a second
+background thread in this same process, gated behind
+AGGRESSIVE_BTC_ENABLED=true so that deploying updated code alone can never
+start it by surprise -- it has to be deliberately turned on via an env var,
+same as any other opt-in here.
 
 Start command (see render.yaml):
     gunicorn render_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120

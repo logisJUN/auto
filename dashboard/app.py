@@ -143,7 +143,8 @@ def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
     skip = snapshot.get("skip_reasons", {}).get(aggressive_btc.SYMBOL)
     return {"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
             "trade_count": len(snapshot.get("history", [])),
-            "skip_reason": skip.get("reason") if skip else None}
+            "skip_reason": skip.get("reason") if skip else None,
+            "symbol": aggressive_btc.SYMBOL}
 
 
 def _build_equity_curve(history: list[dict]) -> dict | None:
@@ -432,7 +433,7 @@ TEMPLATE = """
 
   {% if aggressive_btc %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive BTC (별도 전략)</h2>
+    <h2 style="font-size:1rem;">⚡ Aggressive {{ aggressive_btc.symbol }} (별도 전략)</h2>
     {% if aggressive_btc.position %}
     <table>
       <tr><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th>

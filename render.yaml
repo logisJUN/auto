@@ -47,7 +47,7 @@ services:
       # the Render dashboard sticks instead of being reset by a blueprint sync.
       - key: MAIN_BOT_ENABLED
         sync: false
-      # bot/aggressive_btc.py: separate, optional BTCUSDT-only strategy.
+      # bot/aggressive_btc.py: separate, optional single-symbol strategy (currently SOXLUSDT).
       # AGGRESSIVE_BTC_ENABLED must be explicitly "true" for it to run at
       # all -- deploying this file's changes alone never starts it. sync:
       # false (not a committed value) so a manual "true" set in the Render
