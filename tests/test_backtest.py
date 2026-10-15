@@ -43,8 +43,10 @@ def test_simulate_enters_long_and_exits_on_tp_hit(monkeypatch):
     assert trade.side == "long"
     assert trade.reason == "tp"
     assert trade.entry_price == 100.0
-    assert round(trade.roi_pct, 2) == 12.0  # hit TP exactly -> +12% ROI by construction
+    assert round(trade.fee_pct, 2) == 1.1  # 0.11% round-trip fee * 10x leverage
+    assert round(trade.roi_pct, 2) == 10.9  # +12% gross TP hit, minus the 1.1% fee
     assert result["win_rate"] == 1.0
+    assert round(result["total_fee_pct"], 2) == 1.1
 
 
 def test_simulate_exits_on_sl_hit(monkeypatch):
@@ -60,8 +62,25 @@ def test_simulate_exits_on_sl_hit(monkeypatch):
     assert result["trade_count"] == 1
     trade = result["trades"][0]
     assert trade.reason == "sl"
-    assert round(trade.roi_pct, 2) == -5.0
+    assert round(trade.roi_pct, 2) == -6.1  # -5% gross SL hit, minus the 1.1% fee
     assert result["win_rate"] == 0.0
+
+
+def test_simulate_fee_rate_is_configurable_and_scales_with_leverage(monkeypatch):
+    monkeypatch.setattr(backtest.technical, "score_timeframe",
+                         lambda candles, cfg: {"score": 0.9, "atr": 1.0, "close": 100.0, "rsi": 70.0})
+    monkeypatch.setattr(backtest.technical, "volume_score", lambda candles: 0.0)
+
+    candles = _flat_candles(61, price=100.0)
+    candles.append(_candle(61 * 3600_000, 100.0, 101.5, 99.9, 101.0))  # TP hit, leverage=10x
+
+    zero_fee = simulate(candles, warmup=60, round_trip_fee_pct_of_notional=0.0)
+    assert round(zero_fee["trades"][0].roi_pct, 2) == 12.0  # gross, unaffected
+    assert zero_fee["total_fee_pct"] == 0.0
+
+    custom_fee = simulate(candles, warmup=60, round_trip_fee_pct_of_notional=0.2)
+    assert round(custom_fee["trades"][0].fee_pct, 2) == 2.0  # 0.2% * 10x leverage
+    assert round(custom_fee["trades"][0].roi_pct, 2) == 10.0  # 12% - 2%
 
 
 def test_simulate_assumes_the_worse_outcome_when_tp_and_sl_both_touched_in_one_candle(monkeypatch):

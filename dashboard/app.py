@@ -706,6 +706,7 @@ _BACKTEST_TEMPLATE = """
     <label style="margin-left:10px;">기술 비중</label><input type="number" step="0.05" name="tech_weight" value="{{ tech_weight }}">
     <label style="margin-left:10px;">거래량 비중</label><input type="number" step="0.05" name="volume_weight" value="{{ volume_weight }}">
     <label style="margin-left:10px;">진입 기준</label><input type="number" step="0.05" name="entry_threshold" value="{{ entry_threshold }}">
+    <label style="margin-left:10px;">왕복수수료%(명목가)</label><input type="number" step="0.01" name="fee_pct" value="{{ fee_pct }}">
     <button type="submit" class="run-btn" style="margin-left:10px;">다시 실행</button>
   </form>
 
@@ -714,8 +715,9 @@ _BACKTEST_TEMPLATE = """
     <div class="grid">
       <div><div class="stat-label">거래 수</div><div class="stat-value">{{ result.trade_count }}</div></div>
       <div><div class="stat-label">승률</div><div class="stat-value">{{ '%.0f'|format(result.win_rate * 100) + '%' if result.win_rate is not none else '-' }}</div></div>
-      <div><div class="stat-label">누적 ROI</div><div class="stat-value {{ 'pnl-pos' if result.total_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(result.total_roi_pct) }}%</div></div>
+      <div><div class="stat-label">누적 ROI (수수료 차감 후)</div><div class="stat-value {{ 'pnl-pos' if result.total_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(result.total_roi_pct) }}%</div></div>
       <div><div class="stat-label">거래당 평균 ROI</div><div class="stat-value {{ 'pnl-pos' if result.avg_roi_pct and result.avg_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(result.avg_roi_pct) + '%' if result.avg_roi_pct is not none else '-' }}</div></div>
+      <div><div class="stat-label">수수료 총 영향</div><div class="stat-value pnl-neg">-{{ '%.2f'|format(result.total_fee_pct) }}%</div></div>
     </div>
     <div class="small" style="margin-top:8px;">
       청산 사유: {% for reason, count in result.by_reason.items() %}{{ reason }} {{ count }}건{{ ', ' if not loop.last }}{% endfor %}
@@ -726,7 +728,7 @@ _BACKTEST_TEMPLATE = """
   <div class="card">
     <h2 style="font-size:1rem;">거래 내역 (최근 {{ trades|length }}건)</h2>
     <table>
-      <tr><th>진입시각</th><th>방향</th><th>진입가</th><th>청산가</th><th>레버리지</th><th>ROI%</th><th>사유</th></tr>
+      <tr><th>진입시각</th><th>방향</th><th>진입가</th><th>청산가</th><th>레버리지</th><th>ROI%(수수료 차감)</th><th>수수료%</th><th>사유</th></tr>
       {% for t in trades %}
       <tr>
         <td class="small">{{ t.entry_str }}</td>
@@ -735,6 +737,7 @@ _BACKTEST_TEMPLATE = """
         <td>{{ '%.2f'|format(t.exit_price) }}</td>
         <td>{{ t.leverage|int }}x</td>
         <td class="{{ 'pnl-pos' if t.roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(t.roi_pct) }}%</td>
+        <td class="small pnl-neg">-{{ '%.2f'|format(t.fee_pct) }}%</td>
         <td class="small">{{ t.reason }}</td>
       </tr>
       {% endfor %}
@@ -763,6 +766,7 @@ def backtest_route():
         tech_weight = float(request.args.get("tech_weight", 0.75))
         volume_weight = float(request.args.get("volume_weight", 0.15))
         entry_threshold = float(request.args.get("entry_threshold", 0.5))
+        fee_pct = float(request.args.get("fee_pct", 0.11))
     except ValueError:
         abort(400)
 
@@ -777,20 +781,20 @@ def backtest_route():
                 f"최소 120개 필요). 더 짧은 기간으로 시도해보세요.</p>"), 200
 
     result = simulate(candles, tech_weight=tech_weight, volume_weight=volume_weight,
-                       entry_threshold=entry_threshold)
+                       entry_threshold=entry_threshold, round_trip_fee_pct_of_notional=fee_pct)
 
     trades = []
     for t in result["trades"][-100:]:
         trades.append({
             "entry_str": _kst_str(t.entry_ts / 1000.0), "side": t.side,
             "entry_price": t.entry_price, "exit_price": t.exit_price,
-            "leverage": t.leverage, "roi_pct": t.roi_pct, "reason": t.reason,
+            "leverage": t.leverage, "roi_pct": t.roi_pct, "fee_pct": t.fee_pct, "reason": t.reason,
         })
 
     return render_template_string(
         _BACKTEST_TEMPLATE, result=result, trades=trades, days=days,
         tech_weight=tech_weight, volume_weight=volume_weight, entry_threshold=entry_threshold,
-        symbol=aggressive_btc.SYMBOL, candle_count=len(candles),
+        fee_pct=fee_pct, symbol=aggressive_btc.SYMBOL, candle_count=len(candles),
         token=request.args.get("token", ""),
     )
 

@@ -25,8 +25,19 @@ Known simplifications (bias to be aware of when reading results):
     make results look better than they'd likely be live.
   - Entry/exit prices are NOT rounded to the exchange's actual tick size
     (unlike live trading) -- a small, usually negligible approximation.
-  - No fees/slippage modeled -- real results would be somewhat worse than
-    this shows, especially for a strategy with many small trades.
+  - No slippage modeled -- fills are assumed at exactly the TP/SL/cutoff
+    price, which real market/trigger orders won't always get exactly.
+
+Fees ARE modeled (round_trip_fee_pct_of_notional below, default 0.11% --
+the main bot's observed round-trip taker fee, see config.yaml). This matters
+a lot more than it sounds: fee cost in ROI% terms scales with LEVERAGE (fee
+is charged on notional = margin * leverage, but ROI is measured against
+margin), so at ~10x leverage a single round trip costs roughly 10 * 0.11% =
+~1.1% of margin -- a strategy that trades often can lose most or all of an
+otherwise-positive gross return to fees alone. Watch trade_count: a low-
+frequency combo (10-15 trades over 90 days) is far more fee-resistant than
+a high-frequency one (300+), even if the high-frequency one's GROSS number
+looks better.
 """
 from __future__ import annotations
 
@@ -73,13 +84,15 @@ class BacktestTrade:
     exit_ts: int
     exit_price: float
     leverage: float
-    roi_pct: float
+    roi_pct: float       # NET of the round-trip fee below
+    fee_pct: float        # fee cost alone, in ROI% terms (= round_trip_fee_pct_of_notional * leverage)
     reason: str  # "tp" / "sl" / "hourly_cutoff" / "end_of_data"
 
 
 def simulate(candles: list[dict], warmup: int = 60, window: int = 200,
              tech_weight: float = 0.75, volume_weight: float = 0.15,
-             entry_threshold: float = 0.5) -> dict:
+             entry_threshold: float = 0.5,
+             round_trip_fee_pct_of_notional: float = 0.11) -> dict:
     """Walks `candles` (oldest->newest 1h klines) one at a time, replaying a
     technical+volume-only signal and aggressive_btc's real entry/TP/SL/
     hourly-cutoff rules. See module docstring for why this uses its own
@@ -146,16 +159,21 @@ def simulate(candles: list[dict], warmup: int = 60, window: int = 200,
 
         price_move_pct = (((exit_price - entry_price) / entry_price) * 100.0) if side == "long" \
             else (((entry_price - exit_price) / entry_price) * 100.0)
-        roi = price_move_pct * leverage
+        gross_roi = price_move_pct * leverage
+        # Fee is charged on notional (margin * leverage), but ROI is measured
+        # against margin -- so its cost in ROI% terms scales with leverage.
+        fee_pct = round_trip_fee_pct_of_notional * leverage
+        net_roi = gross_roi - fee_pct
         trades.append(BacktestTrade(
             side=side, entry_ts=candles[i]["ts"], entry_price=entry_price,
             exit_ts=candles[exit_idx]["ts"], exit_price=exit_price,
-            leverage=leverage, roi_pct=roi, reason=reason,
+            leverage=leverage, roi_pct=net_roi, fee_pct=fee_pct, reason=reason,
         ))
         i = exit_idx + 1
 
     wins = [t for t in trades if t.roi_pct > 0]
     total_roi = sum(t.roi_pct for t in trades)
+    total_fees = sum(t.fee_pct for t in trades)
     by_reason: dict[str, int] = {}
     for t in trades:
         by_reason[t.reason] = by_reason.get(t.reason, 0) + 1
@@ -164,7 +182,8 @@ def simulate(candles: list[dict], warmup: int = 60, window: int = 200,
         "trades": trades,
         "trade_count": len(trades),
         "win_rate": (len(wins) / len(trades)) if trades else None,
-        "total_roi_pct": total_roi,
-        "avg_roi_pct": (total_roi / len(trades)) if trades else None,
+        "total_roi_pct": total_roi,              # net of fees
+        "avg_roi_pct": (total_roi / len(trades)) if trades else None,  # net of fees
+        "total_fee_pct": total_fees,
         "by_reason": by_reason,
     }
