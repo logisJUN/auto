@@ -33,6 +33,17 @@ client = BybitClient(
     category=cfg.get("exchange", "category", default="linear"),
 )
 
+
+def _main_bot_enabled() -> bool:
+    """Same flag render_app.py gates the main bot's background thread on.
+    "감시 종목"/the risk stress test below are both built from config.yaml's
+    main-bot symbol list -- showing BTCUSDT there while MAIN_BOT_ENABLED is
+    off (observed live: main bot disabled for aggressive_btc, dashboard still
+    showing BTCUSDT "관망 중") looks like it's actively watching a symbol
+    nothing is actually trading.
+    """
+    return os.getenv("MAIN_BOT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
 # The stress test needs a kline fetch per symbol, and the dashboard auto-refreshes
 # every 20s -- cache it for a few minutes so viewing the dashboard doesn't hammer
 # Bybit's API on every refresh.
@@ -300,6 +311,7 @@ TEMPLATE = """
     {% endif %}
   </div>
 
+  {% if watchlist %}
   <div class="card">
     <h2 style="font-size:1rem;">감시 종목</h2>
     <div class="grid">
@@ -319,6 +331,7 @@ TEMPLATE = """
       {% endfor %}
     </div>
   </div>
+  {% endif %}
 
   <div class="card">
     <h2 style="font-size:1rem;">열린 포지션</h2>
@@ -689,7 +702,8 @@ def index():
             "summary": _decision_summary(d),
         })
 
-    watched_symbols = cfg.get("exchange", "symbols", default=[])
+    main_bot_enabled = _main_bot_enabled()
+    watched_symbols = cfg.get("exchange", "symbols", default=[]) if main_bot_enabled else []
     watchlist = _build_watchlist(client, watched_symbols, snapshot.get("trades", {}), snapshot.get("skip_reasons", {}))
 
     trade_history = []
@@ -710,7 +724,7 @@ def index():
         })
     equity_curve = _build_equity_curve(snapshot.get("history", []))
 
-    stress = _get_stress_test(equity, snapshot.get("trades", {})) if equity > 0 else None
+    stress = _get_stress_test(equity, snapshot.get("trades", {})) if (equity > 0 and main_bot_enabled) else None
     perf = compute_performance_summary(log_dir)
     aggressive_btc_view = _build_aggressive_btc_view(client)
 
