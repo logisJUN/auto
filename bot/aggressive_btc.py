@@ -226,15 +226,18 @@ _STOCK_NEWS_CFG = {
     "max_articles": 80,  # higher than SOXL's 60 -- one shared pool now needs to cover 10 different companies
 }
 
-# Best recollection of Bybit's 1x tokenized-stock USDT perpetuals -- NOT
-# verified against Bybit's live API from this session (network policy here
-# blocks api.bybit.com). main()'s startup validation drops any of these that
-# turn out not to exist rather than crashing; check the dashboard after
-# deploying to see which actually came up, and correct any that didn't
-# against the exact tickers in the Bybit app.
+# Bybit's 1x tokenized-stock USDT perpetuals (TradFi > Futures > Stocks in
+# the app) -- confirmed directly against screenshots of that listing (this
+# sandboxed session can't reach api.bybit.com itself to verify). Two names
+# differ from the obvious guess: Bybit lists TSMC as TSMUSDT (not TSMCUSDT)
+# and AMD's stock token as AMDSTOCKUSDT (not AMDUSDT, likely to avoid
+# colliding with a crypto-named listing) -- neither is used below, but worth
+# knowing if more symbols get added later. main()'s startup validation still
+# drops any symbol that turns out not to be tradable rather than crashing,
+# as a backstop against the list drifting out of date.
 STOCK_SYMBOLS = [
     "AAPLUSDT", "TSLAUSDT", "NVDAUSDT", "AMZNUSDT", "GOOGLUSDT",
-    "METAUSDT", "MSFTUSDT", "NFLXUSDT", "COINUSDT", "MSTRUSDT",
+    "METAUSDT", "MSFTUSDT", "AVGOUSDT", "COINUSDT", "MSTRUSDT",
 ]
 
 STOCK_CONFIGS: list[SymbolConfig] = [

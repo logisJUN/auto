@@ -59,7 +59,7 @@ SYMBOL_KEYWORDS = {
     "METAUSDT": ["meta platforms", "facebook", "instagram", "zuckerberg",
                  "whatsapp", "reality labs"],
     "MSFTUSDT": ["microsoft", "msft", "satya nadella", "azure", "windows", "copilot"],
-    "NFLXUSDT": ["netflix", "nflx"],
+    "AVGOUSDT": ["broadcom", "avgo", "hock tan"],
     "COINUSDT": ["coinbase", "brian armstrong", "coinbase global"],
     "MSTRUSDT": ["microstrategy", "mstr", "michael saylor", "strategy inc"],
 }
