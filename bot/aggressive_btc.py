@@ -168,13 +168,19 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
     found something relevant (their own confidence), same pattern as the
     main bot.
 
-    Weights: technical 0.30, volume 0.15, polymarket 0.10, news 0.45.
+    Weights: technical 0.10, volume 0.15, polymarket 0.10, news 0.65.
     Polymarket stays low (and inert for SOXLUSDT): its crypto-relevant
-    markets have nothing to do with semiconductors. News is now the single
-    largest input -- sector-moving events (export-control changes, a major
+    markets have nothing to do with semiconductors. News now dominates the
+    blend -- sector-moving events (export-control changes, a major
     chipmaker's earnings, Fed rate decisions) tend to show up in headlines
     before they fully show up in 1h technical indicators, unlike
-    Polymarket's weeks-to-months-out questions.
+    Polymarket's weeks-to-months-out questions. Note that news_conf is
+    capped at relevant_article_count/15 (see NewsSignal.score_for_symbol),
+    so this 0.65 weight is rarely fully realized -- with only 1-2 relevant
+    articles (confidence ~0.07-0.13, as observed live), news's actual
+    contribution is a small fraction of 0.65 even on strongly one-sided
+    headlines, and technical (now only 0.10) has correspondingly little
+    power to confirm or override it.
     """
     news_result = news_result or {}
     tech_score = technical_result.get("score", 0.0)
@@ -183,8 +189,8 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
     news_score = news_result.get("score", 0.0)
     news_conf = news_result.get("confidence", 0.0)
 
-    blended = (0.30 * tech_score + 0.15 * volume_score
-               + 0.10 * (poly_score * poly_conf) + 0.45 * (news_score * news_conf))
+    blended = (0.10 * tech_score + 0.15 * volume_score
+               + 0.10 * (poly_score * poly_conf) + 0.65 * (news_score * news_conf))
     blended = max(-1.0, min(1.0, blended))
 
     if blended >= MIN_CONFIDENCE_TO_ENTER:

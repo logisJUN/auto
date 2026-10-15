@@ -78,16 +78,20 @@ def test_tp_sl_prices_tighten_with_higher_leverage():
 # -- compute_signal ---------------------------------------------------------
 
 def test_signal_long_when_blend_strongly_bullish():
+    # with news weighted at 0.65, technical/volume/polymarket alone (even
+    # maxed out) can no longer clear the entry bar -- strong news is required.
     tech = {"score": 0.9, "atr": 1.0, "close": 100.0}
     poly = {"score": 0.8, "confidence": 0.8}
-    result = compute_signal(tech, volume_score=0.5, poly_result=poly)
+    news = {"score": 0.8, "confidence": 0.8}
+    result = compute_signal(tech, volume_score=0.5, poly_result=poly, news_result=news)
     assert result["direction"] == "long"
 
 
 def test_signal_short_when_blend_strongly_bearish():
     tech = {"score": -0.9, "atr": 1.0, "close": 100.0}
     poly = {"score": -0.8, "confidence": 0.8}
-    result = compute_signal(tech, volume_score=-0.5, poly_result=poly)
+    news = {"score": -0.8, "confidence": 0.8}
+    result = compute_signal(tech, volume_score=-0.5, poly_result=poly, news_result=news)
     assert result["direction"] == "short"
 
 
@@ -204,8 +208,8 @@ def test_get_signal_wires_news_signal_into_the_blend(tmp_path, monkeypatch):
     signal = strategy.get_signal()
 
     strategy.news_signal.score_for_symbol.assert_called_once_with(aggressive_btc.SYMBOL)
-    # 0.30*0.5 + 0.15*0 + 0.10*0 + 0.45*(-1.0*1.0) = 0.15 - 0.45 = -0.30
-    assert round(signal["score"], 3) == -0.30
+    # 0.10*0.5 + 0.15*0 + 0.10*0 + 0.65*(-1.0*1.0) = 0.05 - 0.65 = -0.60
+    assert round(signal["score"], 3) == -0.60
 
 
 def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
