@@ -164,12 +164,18 @@ class NewsSignal:
         # Zero confidence here means zero influence on the aggregate (see
         # aggregator.aggregate), the same as any other signal with no data.
         if not relevant:
-            return {"score": 0.0, "confidence": 0.0, "article_count": 0, "sample": []}
+            return {"score": 0.0, "confidence": 0.0, "article_count": 0, "sample": [],
+                    "bullish_count": 0, "bearish_count": 0, "neutral_count": 0}
 
         raw_scores = [_score_text(a["text"]) for a in relevant]
         avg = sum(raw_scores) / len(raw_scores)
         score = max(-1.0, min(1.0, avg / 2.5))
         confidence = max(0.0, min(1.0, len(relevant) / 15))
 
+        bullish_count = sum(1 for s in raw_scores if s > 0)
+        bearish_count = sum(1 for s in raw_scores if s < 0)
+        neutral_count = sum(1 for s in raw_scores if s == 0)
+
         sample = [a["title"] for a in relevant[:5]]
-        return {"score": score, "confidence": confidence, "article_count": len(relevant), "sample": sample}
+        return {"score": score, "confidence": confidence, "article_count": len(relevant), "sample": sample,
+                "bullish_count": bullish_count, "bearish_count": bearish_count, "neutral_count": neutral_count}

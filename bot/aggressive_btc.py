@@ -188,6 +188,9 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
     poly_conf = poly_result.get("confidence", 0.0)
     news_score = news_result.get("score", 0.0)
     news_conf = news_result.get("confidence", 0.0)
+    news_bullish = news_result.get("bullish_count", 0)
+    news_bearish = news_result.get("bearish_count", 0)
+    news_neutral = news_result.get("neutral_count", 0)
 
     blended = (0.10 * tech_score + 0.15 * volume_score
                + 0.10 * (poly_score * poly_conf) + 0.65 * (news_score * news_conf))
@@ -204,7 +207,9 @@ def compute_signal(technical_result: dict, volume_score: float, poly_result: dic
             "close": technical_result.get("close", 0.0),
             "components": {"technical": tech_score, "volume": volume_score,
                             "polymarket": poly_score, "polymarket_confidence": poly_conf,
-                            "news": news_score, "news_confidence": news_conf}}
+                            "news": news_score, "news_confidence": news_conf,
+                            "news_bullish": news_bullish, "news_bearish": news_bearish,
+                            "news_neutral": news_neutral}}
 
 
 def should_hourly_cutoff(hours_open: float, roi_pct: float, last_hour_checked: int) -> tuple[bool, int]:
@@ -251,7 +256,8 @@ class AggressiveBTCStrategy:
         c = signal.get("components", {})
         return (f"T:{c.get('technical', 0.0):+.2f} V:{c.get('volume', 0.0):+.2f} "
                 f"P:{c.get('polymarket', 0.0):+.2f}(conf {c.get('polymarket_confidence', 0.0):.2f}) "
-                f"N:{c.get('news', 0.0):+.2f}(conf {c.get('news_confidence', 0.0):.2f}) "
+                f"N:{c.get('news', 0.0):+.2f}(conf {c.get('news_confidence', 0.0):.2f}, "
+                f"긍정{c.get('news_bullish', 0)}/부정{c.get('news_bearish', 0)}/중립{c.get('news_neutral', 0)}) "
                 f"-> blended={signal['score']:+.2f}")
 
     def try_enter(self):

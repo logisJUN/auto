@@ -114,11 +114,12 @@ def test_signal_ignores_polymarket_when_its_confidence_is_zero():
 def test_signal_includes_component_breakdown_for_display():
     tech = {"score": 0.41, "atr": 1.0, "close": 100.0}
     poly = {"score": 0.2, "confidence": 0.5}
-    news = {"score": -0.3, "confidence": 0.4}
+    news = {"score": -0.3, "confidence": 0.4, "bullish_count": 1, "bearish_count": 2, "neutral_count": 3}
     result = compute_signal(tech, volume_score=0.1, poly_result=poly, news_result=news)
     assert result["components"] == {"technical": 0.41, "volume": 0.1,
                                      "polymarket": 0.2, "polymarket_confidence": 0.5,
-                                     "news": -0.3, "news_confidence": 0.4}
+                                     "news": -0.3, "news_confidence": 0.4,
+                                     "news_bullish": 1, "news_bearish": 2, "news_neutral": 3}
 
 
 def test_signal_news_defaults_to_zero_when_not_provided():
@@ -127,6 +128,9 @@ def test_signal_news_defaults_to_zero_when_not_provided():
     result = compute_signal(tech, volume_score=0.0, poly_result=poly)
     assert result["components"]["news"] == 0.0
     assert result["components"]["news_confidence"] == 0.0
+    assert result["components"]["news_bullish"] == 0
+    assert result["components"]["news_bearish"] == 0
+    assert result["components"]["news_neutral"] == 0
 
 
 # -- roi_pct / should_hourly_cutoff ---------------------------------------------------------
@@ -285,7 +289,9 @@ def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {
         "direction": "neutral", "score": 0.0, "atr": 1.0, "close": 100.0,
-        "components": {"technical": 0.1, "volume": -0.05, "polymarket": 0.0, "polymarket_confidence": 0.0},
+        "components": {"technical": 0.1, "volume": -0.05, "polymarket": 0.0, "polymarket_confidence": 0.0,
+                       "news": -0.2, "news_confidence": 0.13,
+                       "news_bullish": 0, "news_bearish": 1, "news_neutral": 1},
     }
     client.get_equity_usdt.return_value = 100.0
 
@@ -298,6 +304,7 @@ def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     assert "관망 중" in reason["reason"]
     assert "T:+0.10" in reason["reason"]
     assert "V:-0.05" in reason["reason"]
+    assert "긍정0/부정1/중립1" in reason["reason"]
 
 
 def test_try_enter_sets_skip_reason_when_no_margin_available(tmp_path):
