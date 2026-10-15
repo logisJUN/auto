@@ -318,6 +318,14 @@ class AggressiveBTCStrategy:
             return
 
         signal = self.get_signal()
+        # Unthrottled, unlike _log_signal_check's decisions.jsonl record below --
+        # this is the only proof-of-life trace for a "still neutral" tick
+        # anywhere in Application logs (set_skip_reason below writes to the
+        # state file but never calls logger.*), which made a genuinely stuck
+        # loop indistinguishable from a quiet-but-alive one from the logs alone.
+        logger.info("aggressive_btc: tick direction=%s score=%+.2f atr=%.4f close=%.4f",
+                    signal.get("direction"), signal.get("score", 0.0),
+                    signal.get("atr", 0.0), signal.get("close", 0.0))
         self._log_signal_check(signal)
         if signal["atr"] <= 0 or signal["close"] <= 0:
             self.state.set_skip_reason(SYMBOL, "가격/ATR 데이터 없음")
