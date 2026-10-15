@@ -13,8 +13,8 @@ Bybit's kline endpoint for BTCUSDT independently and occasionally tripping
 Bybit's rate limit (ErrCode 10006); turning the main bot off avoids that and
 keeps just the one aggressive_btc strategy running.
 
-bot/aggressive_btc.py (a separate, optional single-symbol strategy --
-currently SOXLUSDT, see its own module docstring) can run as a second
+bot/aggressive_btc.py (a separate, optional multi-symbol strategy --
+currently SOXLUSDT plus 10 stock tokens, see its own module docstring) can run as a second
 background thread in this same process, gated behind
 AGGRESSIVE_BTC_ENABLED=true so that deploying updated code alone can never
 start it by surprise -- it has to be deliberately turned on via an env var,

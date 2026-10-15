@@ -47,6 +47,21 @@ SYMBOL_KEYWORDS = {
                  "nvidia", "amd", "tsmc", "intel", "qualcomm", "broadcom",
                  "philadelphia semiconductor", "sox index", "export controls",
                  "chip ban", "chip export"],
+    # The 10 below are Bybit's 1x tokenized-stock perpetuals (aggressive_btc's
+    # STOCK_SYMBOLS) -- relevant news is about the company itself, not a
+    # bare ticker-as-word match that would pick up unrelated articles (e.g.
+    # not bare "meta" or "coin", which collide with unrelated usage).
+    "AAPLUSDT": ["apple", "aapl", "iphone", "tim cook", "ipad", "macbook"],
+    "TSLAUSDT": ["tesla", "tsla", "elon musk", "cybertruck", "model y", "model 3"],
+    "NVDAUSDT": ["nvidia", "nvda", "jensen huang", "gpu", "h100", "blackwell"],
+    "AMZNUSDT": ["amazon", "amzn", "aws", "jeff bezos", "andy jassy"],
+    "GOOGLUSDT": ["google", "alphabet", "googl", "sundar pichai", "youtube"],
+    "METAUSDT": ["meta platforms", "facebook", "instagram", "zuckerberg",
+                 "whatsapp", "reality labs"],
+    "MSFTUSDT": ["microsoft", "msft", "satya nadella", "azure", "windows", "copilot"],
+    "NFLXUSDT": ["netflix", "nflx"],
+    "COINUSDT": ["coinbase", "brian armstrong", "coinbase global"],
+    "MSTRUSDT": ["microstrategy", "mstr", "michael saylor", "strategy inc"],
 }
 
 

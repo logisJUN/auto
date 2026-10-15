@@ -1,8 +1,11 @@
-"""bot/aggressive_btc.py: a standalone, SEPARATE single-symbol aggressive
-strategy (currently SOXLUSDT; 12% target / 1h, -5% SL, hourly negative-ROI
-cutoff, 6-10x leverage hard-capped at 10x, 50% margin per trade). Deliberately
-isolated from the main bot/strategy.py -- these tests cover its own pure
-logic and its own strategy class in isolation.
+"""bot/aggressive_btc.py: a standalone, SEPARATE multi-symbol aggressive
+strategy (SOXLUSDT plus 10 non-leveraged stock tokens; 12% target / 1h, -5%
+SL, hourly negative-ROI cutoff, 50% margin per trade, global cap of one open
+position at a time across every configured symbol). Deliberately isolated
+from the main bot/strategy.py -- these tests cover its own pure logic and its
+own strategy class in isolation, using SOXL_CONFIG (via the SYMBOL/_make_strategy
+helpers below) as the representative config unless a test specifically needs
+another symbol.
 """
 import time
 from unittest.mock import MagicMock
@@ -23,6 +26,26 @@ from bot.exchange.bybit_client import BybitClient
 from bot.logger import read_recent_decisions
 from bot.notify import Notifier
 from bot.state import StateStore
+
+
+# -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
+
+def test_aggressive_configs_has_soxl_plus_ten_distinct_stock_symbols():
+    symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
+    assert symbols[0] == "SOXLUSDT"
+    assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
+    assert len(symbols) == 11
+    assert len(set(symbols)) == 11  # no duplicates
+
+    stock_configs = aggressive_btc.STOCK_CONFIGS
+    assert len(stock_configs) == 10
+    for sc in stock_configs:
+        # No embedded leverage on these (unlike SOXLUSDT) -- allowed a higher
+        # range, but still well under the original 24x/25x crypto design.
+        assert sc.min_leverage == 8.0
+        assert sc.max_leverage == 15.0
+        assert sc.leverage_hard_cap == 15.0
+        assert sc.margin_pct_of_equity == 50.0  # safe only because of the global 1-position cap
 
 
 # -- compute_leverage ---------------------------------------------------------
@@ -197,7 +220,7 @@ def _make_strategy(tmp_path):
     news_signal = MagicMock()
     news_signal.score_for_symbol.return_value = {"score": 0.0, "confidence": 0.0}
     return (AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal,
-                                   log_dir=str(tmp_path / "logs")),
+                                   cfg=aggressive_btc.SOXL_CONFIG, log_dir=str(tmp_path / "logs")),
             state, client, poly_signal)
 
 
@@ -540,6 +563,26 @@ def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     strategy.try_enter()
 
     client.get_klines.assert_not_called()
+
+
+def test_try_enter_skips_when_a_different_symbol_already_has_a_position(tmp_path):
+    # Global one-position-at-a-time cap across all configured symbols (see
+    # module docstring) -- this strategy's own symbol (SOXLUSDT) is flat, but
+    # some OTHER symbol (e.g. AAPLUSDT) already has an open trade in the
+    # shared state file, so this symbol must not even check its own signal.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade("AAPLUSDT", {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time(), "last_hour_checked": 0,
+    })
+
+    strategy.try_enter()
+
+    client.get_klines.assert_not_called()
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "1개 제한" in skip["reason"]
 
 
 # -- _resolve_credentials ---------------------------------------------------------

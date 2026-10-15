@@ -67,7 +67,9 @@ _stress_cache = {"ts": 0.0, "data": None}
 # (shared rate-limit budget with the bot's own trading calls) on every 20s
 # dashboard refresh for a number that only changes when a trade actually closes.
 _AGG_EXCHANGE_PNL_CACHE_TTL_SEC = 120
-_agg_exchange_pnl_cache = {"ts": 0.0, "value": None}
+# One entry per aggressive_btc symbol (symbol -> {"ts":..., "value":...}) --
+# a plain dict is fine here since the dashboard runs as a single process/thread.
+_agg_exchange_pnl_cache: dict[str, dict] = {}
 
 # USD/KRW moves slowly enough that an hourly refresh is plenty -- avoids a
 # forex API call on every 20s dashboard refresh. Free, no-key endpoint; if it
@@ -127,78 +129,105 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
     return out
 
 
-def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
-    """Standalone view of bot/aggressive_btc.py's own, SEPARATE state file --
-    None if that module has never run (no state file yet), so this section
-    simply doesn't render rather than showing an empty shell forever. Reuses
-    this dashboard's own `client` for price lookups, which assumes
-    aggressive_btc is pointed at the same account (live vs testnet) this
-    dashboard's BYBIT_TESTNET is configured for -- true once aggressive_btc
-    is flipped to live (it then shares the main bot's live account).
+def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
+    """One view per symbol aggressive_btc.py is currently configured to trade
+    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 10 stock tokens) --
+    empty list if that module has never run (no state file yet), so this
+    section simply doesn't render rather than showing an empty shell forever.
+    All configured symbols share ONE state file (StateStore's trades/history/
+    skip_reasons are already keyed by symbol), so this reads it once and
+    slices out each symbol's own view. Reuses this dashboard's own `client`
+    for price lookups, which assumes aggressive_btc is pointed at the same
+    account (live vs testnet) this dashboard's BYBIT_TESTNET is configured
+    for -- true once aggressive_btc is flipped to live (it then shares the
+    main bot's live account).
+
+    Only symbols that show up in history/trades/skip_reasons, OR are in the
+    currently configured list, are included -- a symbol aggressive_btc's own
+    startup validation dropped (an invalid/delisted ticker, see that
+    module's docstring) simply won't appear here either.
     """
     path = aggressive_btc.state_path()
     if not os.path.exists(path):
-        return None
+        return []
     state = StateStore(path)
     snapshot = state.snapshot()
+    all_trades = snapshot.get("trades", {})
+    all_history = snapshot.get("history", [])
+    all_skips = snapshot.get("skip_reasons", {})
 
-    trade = snapshot.get("trades", {}).get(aggressive_btc.SYMBOL)
-    position = None
-    if trade is not None:
-        try:
-            price = client.get_last_price(aggressive_btc.SYMBOL)
-        except BybitAPIError:
-            price = trade["entry_price"]
-        if trade["side"] == "long":
-            unrealized = (price - trade["entry_price"]) * trade["qty"]
-        else:
-            unrealized = (trade["entry_price"] - price) * trade["qty"]
-        roi = aggressive_btc.roi_pct(unrealized, trade["margin"])
-        hours_open = (time.time() - trade["opened_at"]) / 3600.0
-        position = {
-            **trade, "last_price": price, "unrealized": unrealized, "roi_pct": roi,
-            "hours_open": hours_open,
-        }
+    symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
 
-    history = []
-    for t in sorted(snapshot.get("history", []), key=lambda h: h.get("closed_at", 0.0), reverse=True)[:15]:
-        margin = t.get("margin")
-        roi = (t.get("pnl", 0.0) / margin * 100.0) if margin else None
-        history.append({
-            **t, "roi_pct": roi,
-            "time_str": _kst_str(t.get("closed_at", time.time())),
-        })
-
-    cumulative_pnl = sum(t.get("pnl", 0.0) for t in snapshot.get("history", []))
-    skip = snapshot.get("skip_reasons", {}).get(aggressive_btc.SYMBOL)
-
-    # Render's free plan has no persistent disk -- a redeploy wipes this
-    # state file, silently resetting cumulative_pnl/trade_count above to 0
-    # even though real trades already closed on the exchange (observed live:
-    # a -0.24 USDT loss vanished from this dashboard after a same-day
-    # redeploy). Cross-check against Bybit's own closed-pnl ledger for the
-    # last 7 days (its query window per call) so a real loss/gain total is
-    # visible even when the itemized local history was just wiped. This
-    # doesn't attempt to reconstruct the itemized table above -- leverage/
-    # reason ("sl_tp_hit" vs "hourly_cutoff") are this module's own judgment
-    # calls, not something the exchange record carries.
     now = time.time()
-    if now - _agg_exchange_pnl_cache["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
-        try:
-            since_ms = int((now - 7 * 24 * 3600) * 1000)
-            records = client.get_closed_pnl_since(since_ms)
-            _agg_exchange_pnl_cache["value"] = sum(
-                float(r.get("closedPnl") or 0.0) for r in records if r.get("symbol") == aggressive_btc.SYMBOL)
-            _agg_exchange_pnl_cache["ts"] = now
-        except Exception:
-            pass  # keep serving the last good value, if any
-    exchange_pnl_7d = _agg_exchange_pnl_cache["value"]
+    views = []
+    for symbol in symbols:
+        trade = all_trades.get(symbol)
+        position = None
+        if trade is not None:
+            try:
+                price = client.get_last_price(symbol)
+            except BybitAPIError:
+                price = trade["entry_price"]
+            if trade["side"] == "long":
+                unrealized = (price - trade["entry_price"]) * trade["qty"]
+            else:
+                unrealized = (trade["entry_price"] - price) * trade["qty"]
+            roi = aggressive_btc.roi_pct(unrealized, trade["margin"])
+            hours_open = (now - trade["opened_at"]) / 3600.0
+            position = {
+                **trade, "last_price": price, "unrealized": unrealized, "roi_pct": roi,
+                "hours_open": hours_open,
+            }
 
-    return {"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
-            "trade_count": len(snapshot.get("history", [])),
-            "skip_reason": skip.get("reason") if skip else None,
-            "symbol": aggressive_btc.SYMBOL,
-            "exchange_pnl_7d": exchange_pnl_7d}
+        symbol_history_all = [t for t in all_history if t.get("symbol") == symbol]
+        history = []
+        for t in sorted(symbol_history_all, key=lambda h: h.get("closed_at", 0.0), reverse=True)[:15]:
+            margin = t.get("margin")
+            roi = (t.get("pnl", 0.0) / margin * 100.0) if margin else None
+            history.append({
+                **t, "roi_pct": roi,
+                "time_str": _kst_str(t.get("closed_at", time.time())),
+            })
+
+        cumulative_pnl = sum(t.get("pnl", 0.0) for t in symbol_history_all)
+        skip = all_skips.get(symbol)
+
+        if position is None and not symbol_history_all and skip is None:
+            # Never traded, no skip reason recorded yet -- most likely still
+            # mid-warmup right after a redeploy. Skipping it here (rather
+            # than rendering an empty card for all 11 symbols immediately)
+            # keeps the page from being dominated by 10 blank stock cards on
+            # a fresh start; it appears as soon as it has ANY data.
+            continue
+
+        # Render's free plan has no persistent disk -- a redeploy wipes this
+        # state file, silently resetting cumulative_pnl/trade_count above to
+        # 0 even though real trades already closed on the exchange (observed
+        # live: a -0.24 USDT loss vanished from this dashboard after a
+        # same-day redeploy). Cross-check against Bybit's own closed-pnl
+        # ledger for the last 7 days (its query window per call), cached per
+        # symbol, so a real loss/gain total is visible even when the
+        # itemized local history was just wiped. This doesn't attempt to
+        # reconstruct the itemized table above -- leverage/reason ("sl_tp_hit"
+        # vs "hourly_cutoff") are this module's own judgment calls, not
+        # something the exchange record carries.
+        cache_entry = _agg_exchange_pnl_cache.setdefault(symbol, {"ts": 0.0, "value": None})
+        if now - cache_entry["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
+            try:
+                since_ms = int((now - 7 * 24 * 3600) * 1000)
+                records = client.get_closed_pnl_since(since_ms)
+                cache_entry["value"] = sum(
+                    float(r.get("closedPnl") or 0.0) for r in records if r.get("symbol") == symbol)
+                cache_entry["ts"] = now
+            except Exception:
+                pass  # keep serving the last good value, if any
+
+        views.append({"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
+                      "trade_count": len(symbol_history_all),
+                      "skip_reason": skip.get("reason") if skip else None,
+                      "symbol": symbol,
+                      "exchange_pnl_7d": cache_entry["value"]})
+    return views
 
 
 def _build_equity_curve(history: list[dict]) -> dict | None:
@@ -488,44 +517,44 @@ TEMPLATE = """
   </div>
   {% endif %}
 
-  {% if aggressive_btc %}
+  {% for agg in aggressive_list %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive {{ aggressive_btc.symbol }} (별도 전략)</h2>
-    {% if aggressive_btc.position %}
+    <h2 style="font-size:1rem;">⚡ Aggressive {{ agg.symbol }} (별도 전략)</h2>
+    {% if agg.position %}
     <table>
       <tr><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th>
           <th>미실현손익</th><th>ROI%</th><th>경과</th></tr>
       <tr>
-        <td class="{{ 'pos-long' if aggressive_btc.position.side == 'long' else 'pos-short' }}">
-          {{ aggressive_btc.position.side.upper() }}</td>
-        <td>{{ '%.1f'|format(aggressive_btc.position.leverage) }}x</td>
-        <td>{{ aggressive_btc.position.qty }}</td>
-        <td>{{ aggressive_btc.position.entry_price }}</td>
-        <td>{{ aggressive_btc.position.last_price }}</td>
-        <td>{{ '%.2f'|format(aggressive_btc.position.current_sl) }}</td>
-        <td>{{ '%.2f'|format(aggressive_btc.position.current_tp) }}</td>
-        <td class="{{ 'pnl-pos' if aggressive_btc.position.unrealized >= 0 else 'pnl-neg' }}">
-          {{ '%.4f'|format(aggressive_btc.position.unrealized) }}</td>
-        <td class="{{ 'pnl-pos' if aggressive_btc.position.roi_pct >= 0 else 'pnl-neg' }}">
-          {{ '%+.2f'|format(aggressive_btc.position.roi_pct) }}%</td>
-        <td class="small">{{ '%.1f'|format(aggressive_btc.position.hours_open) }}h</td>
+        <td class="{{ 'pos-long' if agg.position.side == 'long' else 'pos-short' }}">
+          {{ agg.position.side.upper() }}</td>
+        <td>{{ '%.1f'|format(agg.position.leverage) }}x</td>
+        <td>{{ agg.position.qty }}</td>
+        <td>{{ agg.position.entry_price }}</td>
+        <td>{{ agg.position.last_price }}</td>
+        <td>{{ '%.2f'|format(agg.position.current_sl) }}</td>
+        <td>{{ '%.2f'|format(agg.position.current_tp) }}</td>
+        <td class="{{ 'pnl-pos' if agg.position.unrealized >= 0 else 'pnl-neg' }}">
+          {{ '%.4f'|format(agg.position.unrealized) }}</td>
+        <td class="{{ 'pnl-pos' if agg.position.roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(agg.position.roi_pct) }}%</td>
+        <td class="small">{{ '%.1f'|format(agg.position.hours_open) }}h</td>
       </tr>
     </table>
     {% else %}
-    <div class="small">{{ aggressive_btc.skip_reason if aggressive_btc.skip_reason else '현재 열린 포지션 없음 - 진입 신호 대기 중' }}</div>
+    <div class="small">{{ agg.skip_reason if agg.skip_reason else '현재 열린 포지션 없음 - 진입 신호 대기 중' }}</div>
     {% endif %}
     <div class="grid" style="margin-top:8px;">
-      <div><div class="stat-label">누적 손익 (로컬 기록)</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.cumulative_pnl) }}</div></div>
-      <div><div class="stat-label">청산된 거래</div><div class="stat-value">{{ aggressive_btc.trade_count }}건</div></div>
-      {% if aggressive_btc.exchange_pnl_7d is not none %}
-      <div><div class="stat-label">거래소 기준 손익 (최근 7일)</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.exchange_pnl_7d) }}</div></div>
+      <div><div class="stat-label">누적 손익 (로컬 기록)</div><div class="stat-value {{ 'pnl-pos' if agg.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.cumulative_pnl) }}</div></div>
+      <div><div class="stat-label">청산된 거래</div><div class="stat-value">{{ agg.trade_count }}건</div></div>
+      {% if agg.exchange_pnl_7d is not none %}
+      <div><div class="stat-label">거래소 기준 손익 (최근 7일)</div><div class="stat-value {{ 'pnl-pos' if agg.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.exchange_pnl_7d) }}</div></div>
       {% endif %}
     </div>
     <div class="small">배포/재시작으로 로컬 기록이 리셋돼도 "거래소 기준" 값은 Bybit 자체 체결 내역에서 다시 계산되므로 유지됩니다 (단, 최근 7일 이전 거래는 집계되지 않음).</div>
-    {% if aggressive_btc.history %}
+    {% if agg.history %}
     <table style="margin-top:8px;">
       <tr><th>시각</th><th>방향</th><th>진입가</th><th>레버리지</th><th>손익</th><th>ROI%</th><th>사유</th></tr>
-      {% for t in aggressive_btc.history %}
+      {% for t in agg.history %}
       <tr>
         <td class="small">{{ t.time_str }}</td>
         <td class="{{ 'pos-long' if t.side == 'long' else 'pos-short' }}">{{ t.side.upper() }}</td>
@@ -539,10 +568,10 @@ TEMPLATE = """
       {% endfor %}
     </table>
     {% endif %}
-    <div class="small">메인 봇과 완전히 분리된 별도 상태 파일을 사용합니다.</div>
-    <div class="small" style="margin-top:6px;"><a href="/backtest?token={{ token }}">기술+거래량 공식 백테스트 →</a></div>
+    <div class="small">메인 봇과 완전히 분리된 별도 상태 파일을 사용하며, aggressive_btc 내 모든 심볼이 동시엔 1개까지만 포지션을 보유합니다.</div>
+    <div class="small" style="margin-top:6px;"><a href="/backtest?token={{ token }}&symbol={{ agg.symbol }}">기술+거래량 공식 백테스트 →</a></div>
   </div>
-  {% endif %}
+  {% endfor %}
 
   <div class="card">
     <h2 style="font-size:1rem;">최근 판단 로그</h2>
@@ -702,6 +731,7 @@ _BACKTEST_TEMPLATE = """
 
   <form method="GET" action="/backtest" class="card">
     <input type="hidden" name="token" value="{{ token }}">
+    <input type="hidden" name="symbol" value="{{ symbol }}">
     <label>기간(일)</label><input type="number" name="days" value="{{ days }}" min="1" max="90">
     <label style="margin-left:10px;">기술 비중</label><input type="number" step="0.05" name="tech_weight" value="{{ tech_weight }}">
     <label style="margin-left:10px;">거래량 비중</label><input type="number" step="0.05" name="volume_weight" value="{{ volume_weight }}">
@@ -755,12 +785,17 @@ _BACKTEST_TEMPLATE = """
 
 @app.route("/backtest")
 def backtest_route():
-    """Triggers bot/backtest.py against real historical SOXLUSDT candles,
+    """Triggers bot/backtest.py against real historical candles for one
+    configured aggressive_btc symbol (?symbol=..., defaulting to SOXLUSDT),
     fetched live via Bybit (see bot.backtest's module docstring for what
     this can/can't validate -- technical+volume only, news can't be
     backtested). GET so it's just a link/bookmark, no state mutated.
     """
     _check_token()
+    configured_symbols = {sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
+    symbol = request.args.get("symbol", aggressive_btc.SYMBOL)
+    if symbol not in configured_symbols:
+        abort(400)
     try:
         days = min(max(int(request.args.get("days", 30)), 1), 90)
         tech_weight = float(request.args.get("tech_weight", 0.75))
@@ -771,7 +806,7 @@ def backtest_route():
         abort(400)
 
     try:
-        candles = fetch_historical_klines(client, aggressive_btc.SYMBOL, aggressive_btc.TIMEFRAME,
+        candles = fetch_historical_klines(client, symbol, aggressive_btc.TIMEFRAME,
                                            total_candles=days * 24)
     except BybitAPIError as exc:
         return f"<p>과거 캔들 조회 실패: {exc}</p>", 502
@@ -794,7 +829,7 @@ def backtest_route():
     return render_template_string(
         _BACKTEST_TEMPLATE, result=result, trades=trades, days=days,
         tech_weight=tech_weight, volume_weight=volume_weight, entry_threshold=entry_threshold,
-        fee_pct=fee_pct, symbol=aggressive_btc.SYMBOL, candle_count=len(candles),
+        fee_pct=fee_pct, symbol=symbol, candle_count=len(candles),
         token=request.args.get("token", ""),
     )
 
@@ -876,7 +911,7 @@ def index():
 
     stress = _get_stress_test(equity, snapshot.get("trades", {})) if (equity > 0 and main_bot_enabled) else None
     perf = compute_performance_summary(log_dir)
-    aggressive_btc_view = _build_aggressive_btc_view(client)
+    aggressive_list = _build_aggressive_btc_views(client)
 
     return render_template_string(
         TEMPLATE,
@@ -898,7 +933,7 @@ def index():
         decisions=decisions,
         stress=stress,
         perf=perf,
-        aggressive_btc=aggressive_btc_view,
+        aggressive_list=aggressive_list,
     )
 
 
