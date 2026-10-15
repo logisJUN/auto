@@ -124,6 +124,13 @@ NEWS_CFG = {
         "https://www.nasdaq.com/feed/rssoutbound?category=Semiconductors",  # Nasdaq Semiconductors category
         "https://www.benzinga.com/feed",                          # Benzinga market news
         "https://finance.yahoo.com/news/rssindex",                # Yahoo Finance
+        # Google News RSS search -- already pre-filtered to this exact query,
+        # so it should skew more relevant per-article than the general finance
+        # feeds above.
+        "https://news.google.com/rss/search?q=semiconductor+OR+chip+OR+Nvidia+OR+AMD+OR+TSMC&hl=en-US&gl=US&ceid=US:en",
+        "https://techcrunch.com/feed/",                           # TechCrunch
+        "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # CNBC Markets
+        "https://www.zdnet.com/news/rss.xml",                     # ZDNet
     ],
     "newsapi_query": "semiconductor OR chip OR chips OR Nvidia OR AMD OR TSMC OR Intel",
     "refresh_minutes": 15,
