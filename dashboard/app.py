@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -23,6 +24,17 @@ from bot.logger import compute_performance_summary, read_recent_decisions
 from bot.risk import stress_test
 from bot.state import StateStore
 from bot import aggressive_btc
+
+# Render's containers run in UTC -- time.localtime() would show every
+# timestamp in the dashboard 9 hours behind. Converting explicitly to KST
+# (UTC+9, no DST) instead of relying on the server's local timezone keeps
+# every displayed time correct regardless of what the host is set to.
+KST = timezone(timedelta(hours=9))
+
+
+def _kst_str(ts: float, fmt: str = "%m-%d %H:%M:%S") -> str:
+    return datetime.fromtimestamp(ts, tz=KST).strftime(fmt)
+
 
 app = Flask(__name__)
 cfg = load_config()
@@ -153,7 +165,7 @@ def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
         roi = (t.get("pnl", 0.0) / margin * 100.0) if margin else None
         history.append({
             **t, "roi_pct": roi,
-            "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(t.get("closed_at", time.time()))),
+            "time_str": _kst_str(t.get("closed_at", time.time())),
         })
 
     cumulative_pnl = sum(t.get("pnl", 0.0) for t in snapshot.get("history", []))
@@ -699,7 +711,7 @@ def index():
     decisions = []
     for d in decisions_raw:
         decisions.append({
-            "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(d.get("ts", time.time()))),
+            "time_str": _kst_str(d.get("ts", time.time())),
             "event": d.get("event", "?"),
             "summary": _decision_summary(d),
         })
@@ -720,7 +732,7 @@ def index():
         pnl_pct = (t.get("pnl", 0.0) / entry_margin_usdt * 100.0) if entry_margin_usdt else None
         trade_history.append({
             **t,
-            "time_str": time.strftime("%m-%d %H:%M:%S", time.localtime(t.get("closed_at", time.time()))),
+            "time_str": _kst_str(t.get("closed_at", time.time())),
             "entry_margin_usdt": entry_margin_usdt,
             "pnl_pct": pnl_pct,
         })
