@@ -6,8 +6,10 @@ news shouldn't be able to push its direction. Zero confidence (not a
 substituted score) means zero influence on the aggregate.
 """
 import time
+from datetime import timedelta
+from unittest.mock import MagicMock
 
-from bot.signals.news import NewsSignal
+from bot.signals.news import NewsSignal, _fetch_rss
 
 
 def _primed(articles: list[dict]) -> NewsSignal:
@@ -68,3 +70,28 @@ def test_articles_are_split_into_bullish_bearish_neutral_counts():
     assert result["bearish_count"] == 1   # "crash", "sell-off"
     assert result["neutral_count"] == 1   # no bullish/bearish keyword hits
     assert result["bullish_count"] + result["bearish_count"] + result["neutral_count"] == result["article_count"]
+
+
+def test_fetch_rss_uses_a_bounded_timeout_and_skips_a_failing_feed(monkeypatch):
+    # feedparser.parse(url) fetches the URL itself with no timeout -- a single
+    # unresponsive feed could hang the whole call forever. _fetch_rss must
+    # fetch via requests (which has its own timeout) first, so a slow/failing
+    # feed only costs a bounded wait and never blocks the other feeds.
+    calls = []
+
+    def fake_get(url, timeout=None, headers=None):
+        calls.append((url, timeout))
+        if url == "https://bad.example/rss":
+            raise TimeoutError("simulated hang/timeout")
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.content = b"<rss><channel><item><title>Good feed article</title></item></channel></rss>"
+        return resp
+
+    monkeypatch.setattr("bot.signals.news.requests.get", fake_get)
+
+    articles = _fetch_rss(["https://bad.example/rss", "https://good.example/rss"], timedelta(hours=12))
+
+    assert calls == [("https://bad.example/rss", 10), ("https://good.example/rss", 10)]
+    assert len(articles) == 1
+    assert articles[0]["title"] == "Good feed article"

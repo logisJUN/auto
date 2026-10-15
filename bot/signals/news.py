@@ -75,13 +75,24 @@ def _entry_time(entry) -> datetime | None:
 
 
 def _fetch_rss(feeds: list[str], lookback: timedelta) -> list[dict]:
+    """feedparser.parse(url) fetches the URL itself with NO timeout -- a single
+    unresponsive feed (connection accepted, server just never replies) hangs
+    this forever with no exception raised, which silently freezes the entire
+    calling tick loop (observed live: aggressive_btc went dead silent for
+    90+ minutes, no errors, no further log lines, after RSS feeds were
+    expanded to 10). Fetching with requests' own timeout first and handing
+    feedparser the already-downloaded bytes avoids ever blocking inside
+    feedparser itself.
+    """
     cutoff = datetime.now(timezone.utc) - lookback
     articles = []
     for url in feeds:
         try:
-            parsed = feedparser.parse(url)
-        except Exception as exc:  # feedparser rarely raises but be safe
-            logger.warning("failed to parse feed %s: %s", url, exc)
+            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            parsed = feedparser.parse(resp.content)
+        except Exception as exc:
+            logger.warning("failed to fetch/parse feed %s: %s", url, exc)
             continue
         for entry in parsed.entries:
             ts = _entry_time(entry)
