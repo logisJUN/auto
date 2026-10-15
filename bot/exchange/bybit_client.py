@@ -65,12 +65,19 @@ class BybitClient:
         raise BybitAPIError(f"{name} network error after {attempts} attempt(s): {last_exc}")
 
     # -- market data ---------------------------------------------------------
-    def get_klines(self, symbol: str, interval: str, limit: int = 200) -> list[dict]:
-        """Returns oldest->newest list of {ts, open, high, low, close, volume}."""
-        result = self._call(
-            self.session.get_kline,
-            category=self.category, symbol=symbol, interval=interval, limit=limit,
-        )
+    def get_klines(self, symbol: str, interval: str, limit: int = 200,
+                    end_time_ms: int | None = None) -> list[dict]:
+        """Returns oldest->newest list of {ts, open, high, low, close, volume}.
+
+        end_time_ms (Bybit's `end` param, inclusive upper bound in ms) lets a
+        caller page backward through history (see bot/backtest.py) -- omitted
+        by default, which is the existing "most recent `limit` candles"
+        behavior every other caller relies on.
+        """
+        kwargs = dict(category=self.category, symbol=symbol, interval=interval, limit=limit)
+        if end_time_ms is not None:
+            kwargs["end"] = end_time_ms
+        result = self._call(self.session.get_kline, **kwargs)
         rows = result.get("list", [])
         candles = [
             {

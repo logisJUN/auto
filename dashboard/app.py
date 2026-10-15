@@ -18,6 +18,7 @@ from pathlib import Path
 import requests
 from flask import Flask, abort, redirect, render_template_string, request
 
+from bot.backtest import fetch_historical_klines, simulate
 from bot.config import load_config
 from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import compute_performance_summary, read_recent_decisions
@@ -297,6 +298,7 @@ TEMPLATE = """
   .copy-btn:active { background:#30363d; }
   .reset-btn { width:100%; background:#4d1a1a; color:#ff7b72; border:1px solid #6e2323;
                border-radius:6px; padding:10px 12px; font-size:0.85rem; font-weight:600; }
+  a { color:#7ee787; }
   .reset-btn:active { background:#6e2323; }
 </style>
 </head>
@@ -538,6 +540,7 @@ TEMPLATE = """
     </table>
     {% endif %}
     <div class="small">메인 봇과 완전히 분리된 별도 상태 파일을 사용합니다.</div>
+    <div class="small" style="margin-top:6px;"><a href="/backtest?token={{ token }}">기술+거래량 공식 백테스트 →</a></div>
   </div>
   {% endif %}
 
@@ -661,6 +664,135 @@ def reset_daily_loss():
     state.request_daily_reset()
     token = request.args.get("token", "")
     return redirect(f"/?token={token}")
+
+
+_BACKTEST_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aggressive 백테스트</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  h1 { font-size:1.2rem; margin-bottom:4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap:8px; }
+  .stat-label { font-size:0.75rem; color:#8b949e; }
+  .stat-value { font-size:1.1rem; font-weight:600; }
+  .pos-long { color:#7ee787; } .pos-short { color:#ff7b72; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  input { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:6px; width:80px; }
+  label { font-size:0.8rem; color:#8b949e; margin-right:4px; }
+  .run-btn { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
+             padding:8px 14px; font-size:0.85rem; }
+  a { color:#7ee787; }
+</style>
+</head>
+<body>
+  <h1>⚡ Aggressive {{ symbol }} 백테스트 (기술+거래량 전용)</h1>
+  <div class="small" style="margin-bottom:10px;">
+    실거래는 뉴스 신호(가중치 0.65)가 주도하지만, 과거 뉴스 데이터가 없어 백테스트할 수 없어요.
+    이 결과는 <b>뉴스를 뺀 기술+거래량 공식만 따로 떼어</b> 과거 실제 가격으로 검증한 거예요 --
+    실거래 성과를 그대로 예측하는 게 아니라 "이 공식 자체가 쓸만한지"를 보는 용도입니다.
+  </div>
+
+  <form method="GET" action="/backtest" class="card">
+    <input type="hidden" name="token" value="{{ token }}">
+    <label>기간(일)</label><input type="number" name="days" value="{{ days }}" min="1" max="90">
+    <label style="margin-left:10px;">기술 비중</label><input type="number" step="0.05" name="tech_weight" value="{{ tech_weight }}">
+    <label style="margin-left:10px;">거래량 비중</label><input type="number" step="0.05" name="volume_weight" value="{{ volume_weight }}">
+    <label style="margin-left:10px;">진입 기준</label><input type="number" step="0.05" name="entry_threshold" value="{{ entry_threshold }}">
+    <button type="submit" class="run-btn" style="margin-left:10px;">다시 실행</button>
+  </form>
+
+  <div class="card">
+    <div class="small" style="margin-bottom:6px;">확보된 캔들: {{ candle_count }}개 (최대 {{ days }}일 요청)</div>
+    <div class="grid">
+      <div><div class="stat-label">거래 수</div><div class="stat-value">{{ result.trade_count }}</div></div>
+      <div><div class="stat-label">승률</div><div class="stat-value">{{ '%.0f'|format(result.win_rate * 100) + '%' if result.win_rate is not none else '-' }}</div></div>
+      <div><div class="stat-label">누적 ROI</div><div class="stat-value {{ 'pnl-pos' if result.total_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(result.total_roi_pct) }}%</div></div>
+      <div><div class="stat-label">거래당 평균 ROI</div><div class="stat-value {{ 'pnl-pos' if result.avg_roi_pct and result.avg_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(result.avg_roi_pct) + '%' if result.avg_roi_pct is not none else '-' }}</div></div>
+    </div>
+    <div class="small" style="margin-top:8px;">
+      청산 사유: {% for reason, count in result.by_reason.items() %}{{ reason }} {{ count }}건{{ ', ' if not loop.last }}{% endfor %}
+    </div>
+  </div>
+
+  {% if trades %}
+  <div class="card">
+    <h2 style="font-size:1rem;">거래 내역 (최근 {{ trades|length }}건)</h2>
+    <table>
+      <tr><th>진입시각</th><th>방향</th><th>진입가</th><th>청산가</th><th>레버리지</th><th>ROI%</th><th>사유</th></tr>
+      {% for t in trades %}
+      <tr>
+        <td class="small">{{ t.entry_str }}</td>
+        <td class="{{ 'pos-long' if t.side == 'long' else 'pos-short' }}">{{ t.side.upper() }}</td>
+        <td>{{ '%.2f'|format(t.entry_price) }}</td>
+        <td>{{ '%.2f'|format(t.exit_price) }}</td>
+        <td>{{ t.leverage|int }}x</td>
+        <td class="{{ 'pnl-pos' if t.roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(t.roi_pct) }}%</td>
+        <td class="small">{{ t.reason }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% else %}
+  <div class="card"><div class="small">이 기간/설정으로는 진입 신호가 한 번도 안 나왔어요.</div></div>
+  {% endif %}
+
+  <a href="/?token={{ token }}">← 대시보드로 돌아가기</a>
+</body>
+</html>
+"""
+
+
+@app.route("/backtest")
+def backtest_route():
+    """Triggers bot/backtest.py against real historical SOXLUSDT candles,
+    fetched live via Bybit (see bot.backtest's module docstring for what
+    this can/can't validate -- technical+volume only, news can't be
+    backtested). GET so it's just a link/bookmark, no state mutated.
+    """
+    _check_token()
+    try:
+        days = min(max(int(request.args.get("days", 30)), 1), 90)
+        tech_weight = float(request.args.get("tech_weight", 0.75))
+        volume_weight = float(request.args.get("volume_weight", 0.15))
+        entry_threshold = float(request.args.get("entry_threshold", 0.5))
+    except ValueError:
+        abort(400)
+
+    try:
+        candles = fetch_historical_klines(client, aggressive_btc.SYMBOL, aggressive_btc.TIMEFRAME,
+                                           total_candles=days * 24)
+    except BybitAPIError as exc:
+        return f"<p>과거 캔들 조회 실패: {exc}</p>", 502
+
+    if len(candles) < 120:
+        return (f"<p>히스토리 데이터가 부족해요 ({len(candles)}개 캔들만 확보됨, "
+                f"최소 120개 필요). 더 짧은 기간으로 시도해보세요.</p>"), 200
+
+    result = simulate(candles, tech_weight=tech_weight, volume_weight=volume_weight,
+                       entry_threshold=entry_threshold)
+
+    trades = []
+    for t in result["trades"][-100:]:
+        trades.append({
+            "entry_str": _kst_str(t.entry_ts / 1000.0), "side": t.side,
+            "entry_price": t.entry_price, "exit_price": t.exit_price,
+            "leverage": t.leverage, "roi_pct": t.roi_pct, "reason": t.reason,
+        })
+
+    return render_template_string(
+        _BACKTEST_TEMPLATE, result=result, trades=trades, days=days,
+        tech_weight=tech_weight, volume_weight=volume_weight, entry_threshold=entry_threshold,
+        symbol=aggressive_btc.SYMBOL, candle_count=len(candles),
+        token=request.args.get("token", ""),
+    )
 
 
 @app.route("/")
