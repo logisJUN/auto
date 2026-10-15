@@ -296,15 +296,22 @@ class AggressiveBTCStrategy:
         in "관망" -- without this, decisions.jsonl (and the dashboard's "최근
         판단 로그") only ever shows actual entries/exits, which can be hours
         apart, with no way to see how the score was trending in between.
+
+        This is observability only -- it must never be able to block the
+        actual trading decision right after it (set_skip_reason / try_enter's
+        entry path). Any failure here is caught and logged, not re-raised.
         """
         now = time.time()
         if now - self._last_signal_log_ts < SIGNAL_LOG_INTERVAL_SEC:
             return
         self._last_signal_log_ts = now
-        log_decision(self.log_dir, {
-            "event": "signal_check", "symbol": SYMBOL, "direction": signal.get("direction"),
-            "score": signal.get("score"), "signal": self._signal_for_log(signal),
-        })
+        try:
+            log_decision(self.log_dir, {
+                "event": "signal_check", "symbol": SYMBOL, "direction": signal.get("direction"),
+                "score": signal.get("score"), "signal": self._signal_for_log(signal),
+            })
+        except Exception:
+            logger.exception("aggressive_btc: failed to log signal_check decision")
 
     def try_enter(self):
         if self.state.get_trade(SYMBOL) is not None:
@@ -410,9 +417,12 @@ class AggressiveBTCStrategy:
                f"SL={sl_price:.2f} TP={tp_price:.2f} lev={leverage:.1f}x score={signal['score']:+.2f}")
         logger.info(msg)
         self.notifier.send(msg)
-        log_decision(self.log_dir, {"event": "entry", "symbol": SYMBOL, "side": side, "qty": qty,
-                                     "entry_price": entry_price, "sl": sl_price, "tp": tp_price,
-                                     "leverage": leverage, "signal": self._signal_for_log(signal)})
+        try:
+            log_decision(self.log_dir, {"event": "entry", "symbol": SYMBOL, "side": side, "qty": qty,
+                                         "entry_price": entry_price, "sl": sl_price, "tp": tp_price,
+                                         "leverage": leverage, "signal": self._signal_for_log(signal)})
+        except Exception:
+            logger.exception("aggressive_btc: failed to log entry decision")
 
     # -- management ---------------------------------------------------------
     def manage_open_position(self):
@@ -472,8 +482,11 @@ class AggressiveBTCStrategy:
         msg = f"[aggressive_btc 종료:{reason}] {SYMBOL} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
         logger.info(msg)
         self.notifier.send(msg)
-        log_decision(self.log_dir, {"event": "exit", "symbol": SYMBOL, "side": trade["side"],
-                                     "reason": reason, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
+        try:
+            log_decision(self.log_dir, {"event": "exit", "symbol": SYMBOL, "side": trade["side"],
+                                         "reason": reason, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
+        except Exception:
+            logger.exception("aggressive_btc: failed to log exit decision")
 
     # -- loop ---------------------------------------------------------
     def tick(self):
