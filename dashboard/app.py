@@ -623,6 +623,8 @@ def _decision_summary(d: dict) -> str:
             if breakdown:
                 base += f" [{breakdown}]"
         return base
+    if event == "started":
+        return f"{d.get('symbol')} 프로세스 시작됨 ({d.get('mode')})"
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 

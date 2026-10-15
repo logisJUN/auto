@@ -547,12 +547,27 @@ def main():
 
     client = BybitClient(api_key=api_key, api_secret=api_secret, testnet=TESTNET, category="linear")
     state = StateStore(state_path())
+    # Write the state file immediately, before anything else below has a
+    # chance to fail -- the dashboard's whole "Aggressive SOXLUSDT" card only
+    # renders when this file exists (see dashboard/app.py's
+    # _build_aggressive_btc_view), so this guarantees the card shows up as
+    # soon as this process starts, independent of whether try_enter()/
+    # get_signal() ever succeed afterward.
+    state.save()
     poly_signal = PolymarketSignal(POLYMARKET_CFG)
     news_signal = NewsSignal(NEWS_CFG, secrets.newsapi_key)
     log_dir = os.getenv("LOG_DIR", "logs")  # same shared decisions.jsonl the main bot and dashboard use
     strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal, log_dir)
 
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {SYMBOL} 단독, 목표 +{TARGET_PCT:.0f}% / 손절 -{STOP_LOSS_PCT:.0f}%")
+    # Guarantees at least one row in "최근 판단 로그" the moment this process
+    # starts, regardless of whether the tick loop below ever gets anywhere --
+    # previously the very first row could only ever be an entry/exit/
+    # signal_check, all of which require try_enter() to run cleanly first.
+    try:
+        log_decision(log_dir, {"event": "started", "symbol": SYMBOL, "mode": mode})
+    except Exception:
+        logger.exception("aggressive_btc: failed to log started decision")
 
     while True:
         loop_start = time.time()
