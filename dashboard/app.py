@@ -39,6 +39,12 @@ client = BybitClient(
 _STRESS_CACHE_TTL_SEC = 300
 _stress_cache = {"ts": 0.0, "data": None}
 
+# Same reasoning as _stress_cache above -- avoids an extra Bybit API call
+# (shared rate-limit budget with the bot's own trading calls) on every 20s
+# dashboard refresh for a number that only changes when a trade actually closes.
+_AGG_EXCHANGE_PNL_CACHE_TTL_SEC = 120
+_agg_exchange_pnl_cache = {"ts": 0.0, "value": None}
+
 # USD/KRW moves slowly enough that an hourly refresh is plenty -- avoids a
 # forex API call on every 20s dashboard refresh. Free, no-key endpoint; if it
 # ever fails, the dashboard just omits the KRW figure rather than erroring.
@@ -141,10 +147,34 @@ def _build_aggressive_btc_view(client: BybitClient) -> dict | None:
 
     cumulative_pnl = sum(t.get("pnl", 0.0) for t in snapshot.get("history", []))
     skip = snapshot.get("skip_reasons", {}).get(aggressive_btc.SYMBOL)
+
+    # Render's free plan has no persistent disk -- a redeploy wipes this
+    # state file, silently resetting cumulative_pnl/trade_count above to 0
+    # even though real trades already closed on the exchange (observed live:
+    # a -0.24 USDT loss vanished from this dashboard after a same-day
+    # redeploy). Cross-check against Bybit's own closed-pnl ledger for the
+    # last 7 days (its query window per call) so a real loss/gain total is
+    # visible even when the itemized local history was just wiped. This
+    # doesn't attempt to reconstruct the itemized table above -- leverage/
+    # reason ("sl_tp_hit" vs "hourly_cutoff") are this module's own judgment
+    # calls, not something the exchange record carries.
+    now = time.time()
+    if now - _agg_exchange_pnl_cache["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
+        try:
+            since_ms = int((now - 7 * 24 * 3600) * 1000)
+            records = client.get_closed_pnl_since(since_ms)
+            _agg_exchange_pnl_cache["value"] = sum(
+                float(r.get("closedPnl") or 0.0) for r in records if r.get("symbol") == aggressive_btc.SYMBOL)
+            _agg_exchange_pnl_cache["ts"] = now
+        except Exception:
+            pass  # keep serving the last good value, if any
+    exchange_pnl_7d = _agg_exchange_pnl_cache["value"]
+
     return {"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
             "trade_count": len(snapshot.get("history", [])),
             "skip_reason": skip.get("reason") if skip else None,
-            "symbol": aggressive_btc.SYMBOL}
+            "symbol": aggressive_btc.SYMBOL,
+            "exchange_pnl_7d": exchange_pnl_7d}
 
 
 def _build_equity_curve(history: list[dict]) -> dict | None:
@@ -458,9 +488,13 @@ TEMPLATE = """
     <div class="small">{{ aggressive_btc.skip_reason if aggressive_btc.skip_reason else '현재 열린 포지션 없음 - 진입 신호 대기 중' }}</div>
     {% endif %}
     <div class="grid" style="margin-top:8px;">
-      <div><div class="stat-label">누적 손익</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.cumulative_pnl) }}</div></div>
+      <div><div class="stat-label">누적 손익 (로컬 기록)</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.cumulative_pnl) }}</div></div>
       <div><div class="stat-label">청산된 거래</div><div class="stat-value">{{ aggressive_btc.trade_count }}건</div></div>
+      {% if aggressive_btc.exchange_pnl_7d is not none %}
+      <div><div class="stat-label">거래소 기준 손익 (최근 7일)</div><div class="stat-value {{ 'pnl-pos' if aggressive_btc.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_btc.exchange_pnl_7d) }}</div></div>
+      {% endif %}
     </div>
+    <div class="small">배포/재시작으로 로컬 기록이 리셋돼도 "거래소 기준" 값은 Bybit 자체 체결 내역에서 다시 계산되므로 유지됩니다 (단, 최근 7일 이전 거래는 집계되지 않음).</div>
     {% if aggressive_btc.history %}
     <table style="margin-top:8px;">
       <tr><th>시각</th><th>방향</th><th>진입가</th><th>레버리지</th><th>손익</th><th>ROI%</th><th>사유</th></tr>
