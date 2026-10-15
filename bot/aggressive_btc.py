@@ -121,6 +121,9 @@ NEWS_CFG = {
         "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # CNBC Technology
         "https://www.investing.com/rss/news_25.rss",              # Investing.com stock market news
         "https://www.marketwatch.com/rss/topstories",             # MarketWatch top stories
+        "https://www.nasdaq.com/feed/rssoutbound?category=Semiconductors",  # Nasdaq Semiconductors category
+        "https://www.benzinga.com/feed",                          # Benzinga market news
+        "https://finance.yahoo.com/news/rssindex",                # Yahoo Finance
     ],
     "newsapi_query": "semiconductor OR chip OR chips OR Nvidia OR AMD OR TSMC OR Intel",
     "refresh_minutes": 15,
