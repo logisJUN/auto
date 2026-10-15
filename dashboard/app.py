@@ -599,6 +599,17 @@ def _decision_summary(d: dict) -> str:
         return base
     if event == "adjust":
         return f"{d.get('symbol')} SL={d.get('sl')} TP={d.get('tp')} ({d.get('reason')})"
+    if event == "signal_check":
+        # aggressive_btc.py's throttled (every few minutes) record of the
+        # blended score while flat -- lets the score-over-time trend show up
+        # here even on a long stretch with no actual entry/exit.
+        base = f"{d.get('symbol')} 관망 dir={d.get('direction')} score={d.get('score', 0.0):+.2f}"
+        signal = d.get("signal")
+        if signal:
+            breakdown = _component_breakdown(signal)
+            if breakdown:
+                base += f" [{breakdown}]"
+        return base
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 

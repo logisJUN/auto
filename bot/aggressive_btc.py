@@ -58,6 +58,7 @@ import time
 
 from bot.config import Secrets, load_config
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
+from bot.logger import log_decision
 from bot.notify import Notifier
 from bot.risk.position_sizing import compute_qty_fixed_margin
 from bot.signals import technical
@@ -87,6 +88,12 @@ MIN_CONFIDENCE_TO_ENTER = 0.4   # |blended score| needed to call it "강세"
 # just noise-level confirmation, from whichever components are active.
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
+# Logging every 30s tick's signal to decisions.jsonl would mostly be
+# unchanged noise (ticks that often show the same "still neutral" read) --
+# throttled to once per 5 minutes gives a readable score-over-time history on
+# the dashboard's "최근 판단 로그" without flooding the (ephemeral, redeploy-
+# wiped) log file.
+SIGNAL_LOG_INTERVAL_SEC = 300
 
 TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
@@ -235,12 +242,14 @@ def roi_pct(unrealized_pnl: float, margin: float) -> float:
 
 class AggressiveBTCStrategy:
     def __init__(self, client: BybitClient, state: StateStore, notifier: Notifier,
-                 poly_signal: PolymarketSignal, news_signal: NewsSignal):
+                 poly_signal: PolymarketSignal, news_signal: NewsSignal, log_dir: str = "logs"):
         self.client = client
         self.state = state
         self.notifier = notifier
         self.poly_signal = poly_signal
         self.news_signal = news_signal
+        self.log_dir = log_dir
+        self._last_signal_log_ts = 0.0
 
     # -- signal ---------------------------------------------------------
     def get_signal(self) -> dict:
@@ -260,11 +269,39 @@ class AggressiveBTCStrategy:
                 f"긍정{c.get('news_bullish', 0)}/부정{c.get('news_bearish', 0)}/중립{c.get('news_neutral', 0)}) "
                 f"-> blended={signal['score']:+.2f}")
 
+    @staticmethod
+    def _signal_for_log(signal: dict) -> dict:
+        """Reshapes compute_signal()'s flat components dict (e.g.
+        {"technical": 0.41, ...}) into the nested-per-source shape the
+        dashboard's _component_breakdown (built for the main bot's
+        aggregator.py output) expects (e.g. {"technical": {"score": 0.41}}),
+        so the same "최근 판단 로그" rendering works for both without
+        duplicating that formatting logic here.
+        """
+        c = signal.get("components", {})
+        return {"components": {k: {"score": c[k]} for k in ("technical", "volume", "polymarket", "news") if k in c}}
+
+    def _log_signal_check(self, signal: dict):
+        """Throttled record of the blended score even while just sitting flat
+        in "관망" -- without this, decisions.jsonl (and the dashboard's "최근
+        판단 로그") only ever shows actual entries/exits, which can be hours
+        apart, with no way to see how the score was trending in between.
+        """
+        now = time.time()
+        if now - self._last_signal_log_ts < SIGNAL_LOG_INTERVAL_SEC:
+            return
+        self._last_signal_log_ts = now
+        log_decision(self.log_dir, {
+            "event": "signal_check", "symbol": SYMBOL, "direction": signal.get("direction"),
+            "score": signal.get("score"), "signal": self._signal_for_log(signal),
+        })
+
     def try_enter(self):
         if self.state.get_trade(SYMBOL) is not None:
             return
 
         signal = self.get_signal()
+        self._log_signal_check(signal)
         if signal["atr"] <= 0 or signal["close"] <= 0:
             self.state.set_skip_reason(SYMBOL, "가격/ATR 데이터 없음")
             return
@@ -363,6 +400,9 @@ class AggressiveBTCStrategy:
                f"SL={sl_price:.2f} TP={tp_price:.2f} lev={leverage:.1f}x score={signal['score']:+.2f}")
         logger.info(msg)
         self.notifier.send(msg)
+        log_decision(self.log_dir, {"event": "entry", "symbol": SYMBOL, "side": side, "qty": qty,
+                                     "entry_price": entry_price, "sl": sl_price, "tp": tp_price,
+                                     "leverage": leverage, "signal": self._signal_for_log(signal)})
 
     # -- management ---------------------------------------------------------
     def manage_open_position(self):
@@ -422,6 +462,8 @@ class AggressiveBTCStrategy:
         msg = f"[aggressive_btc 종료:{reason}] {SYMBOL} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
         logger.info(msg)
         self.notifier.send(msg)
+        log_decision(self.log_dir, {"event": "exit", "symbol": SYMBOL, "side": trade["side"],
+                                     "reason": reason, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
 
     # -- loop ---------------------------------------------------------
     def tick(self):
@@ -476,7 +518,8 @@ def main():
     state = StateStore(state_path())
     poly_signal = PolymarketSignal(POLYMARKET_CFG)
     news_signal = NewsSignal(NEWS_CFG, secrets.newsapi_key)
-    strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal)
+    log_dir = os.getenv("LOG_DIR", "logs")  # same shared decisions.jsonl the main bot and dashboard use
+    strategy = AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal, log_dir)
 
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {SYMBOL} 단독, 목표 +{TARGET_PCT:.0f}% / 손절 -{STOP_LOSS_PCT:.0f}%")
 

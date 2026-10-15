@@ -20,6 +20,7 @@ from bot.aggressive_btc import (
     should_hourly_cutoff,
 )
 from bot.exchange.bybit_client import BybitClient
+from bot.logger import read_recent_decisions
 from bot.notify import Notifier
 from bot.state import StateStore
 
@@ -195,7 +196,8 @@ def _make_strategy(tmp_path):
     poly_signal.score.return_value = {"score": 0.0, "confidence": 0.0}
     news_signal = MagicMock()
     news_signal.score_for_symbol.return_value = {"score": 0.0, "confidence": 0.0}
-    return (AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal),
+    return (AggressiveBTCStrategy(client, state, notifier, poly_signal, news_signal,
+                                   log_dir=str(tmp_path / "logs")),
             state, client, poly_signal)
 
 
@@ -236,6 +238,32 @@ def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
     assert trade["side"] == "long"
     assert trade["margin"] == 50.0  # 50% of 100 equity
     assert state.get_skip_reason(SYMBOL) is None
+
+
+def test_try_enter_logs_an_entry_decision_on_success(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0,
+        "components": {"technical": 0.5, "volume": 0.2, "polymarket": 0.0,
+                        "polymarket_confidence": 0.0, "news": 0.1, "news_confidence": 0.3},
+    }
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    decisions = read_recent_decisions(strategy.log_dir)
+    entries = [d for d in decisions if d.get("event") == "entry"]
+    assert len(entries) == 1
+    assert entries[0]["symbol"] == SYMBOL
+    assert entries[0]["side"] == "long"
+    assert entries[0]["signal"]["components"]["technical"]["score"] == 0.5
 
 
 def test_try_enter_truncates_leverage_to_a_whole_number_before_pricing_tp_sl(tmp_path):
@@ -305,6 +333,28 @@ def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     assert "T:+0.10" in reason["reason"]
     assert "V:-0.05" in reason["reason"]
     assert "긍정0/부정1/중립1" in reason["reason"]
+
+    decisions = read_recent_decisions(strategy.log_dir)
+    checks = [d for d in decisions if d.get("event") == "signal_check"]
+    assert len(checks) == 1
+    assert checks[0]["direction"] == "neutral"
+    assert checks[0]["signal"]["components"]["technical"]["score"] == 0.1
+
+
+def test_signal_check_logging_is_throttled(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "neutral", "score": 0.0, "atr": 1.0, "close": 100.0,
+        "components": {"technical": 0.1, "volume": 0.0, "polymarket": 0.0, "polymarket_confidence": 0.0},
+    }
+    client.get_equity_usdt.return_value = 100.0
+
+    strategy.try_enter()
+    strategy.try_enter()  # immediately again -- still within the throttle window
+
+    decisions = read_recent_decisions(strategy.log_dir)
+    checks = [d for d in decisions if d.get("event") == "signal_check"]
+    assert len(checks) == 1  # not 2 -- throttled
 
 
 def test_try_enter_sets_skip_reason_when_no_margin_available(tmp_path):
@@ -431,6 +481,12 @@ def test_manage_open_position_closes_on_hourly_cutoff(tmp_path):
     assert state.get_trade(SYMBOL) is None
     history = state.snapshot()["history"]
     assert history[-1]["reason"] == "hourly_cutoff"
+
+    decisions = read_recent_decisions(strategy.log_dir)
+    exits = [d for d in decisions if d.get("event") == "exit"]
+    assert len(exits) == 1
+    assert exits[0]["symbol"] == SYMBOL
+    assert exits[0]["reason"] == "hourly_cutoff"
 
 
 def test_manage_open_position_keeps_a_profitable_trade_open_past_the_hour(tmp_path):
