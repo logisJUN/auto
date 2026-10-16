@@ -659,17 +659,31 @@ def _decision_summary(d: dict) -> str:
     if event == "signal_check":
         # aggressive_btc.py's throttled (every few minutes) record of the
         # blended score while flat -- lets the score-over-time trend show up
-        # here even on a long stretch with no actual entry/exit.
-        base = f"{d.get('symbol')} 관망 dir={d.get('direction')} score={d.get('score', 0.0):+.2f}"
-        signal = d.get("signal")
-        if signal:
-            breakdown = _component_breakdown(signal)
-            if breakdown:
-                base += f" [{breakdown}]"
-        return base
+        # here even on a long stretch with no actual entry/exit. With 39
+        # symbols now sharing this log, the old per-row "{symbol} 관망 dir=...
+        # [T:... V:... N:... P:...]" text made the table unscannable -- the
+        # symbol moved to its own column (see _decision_event_label) and the
+        # per-source breakdown dropped, leaving just the one number that
+        # actually answers "how close is this symbol to entering."
+        return f"{d.get('score', 0.0):+.2f}"
     if event == "started":
         return f"{d.get('symbol')} 프로세스 시작됨 ({d.get('mode')})"
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
+
+
+def _decision_event_label(d: dict) -> str:
+    """What the "이벤트" column shows. signal_check rows show the symbol
+    (e.g. "METAUSDT") instead of the literal event name -- with 39 symbols
+    sharing this log, "signal_check" in every row told you nothing, while the
+    symbol is exactly what you'd scan the column for. Other event types keep
+    showing the literal event name: entry/exit/adjust are already symbol-
+    prefixed in their own summary text, and "started"'s own symbol field is
+    every configured symbol joined together (not a single ticker), so it
+    would make a poor column value here.
+    """
+    if d.get("event") == "signal_check":
+        return d.get("symbol") or "signal_check"
+    return d.get("event", "?")
 
 
 @app.route("/healthz")
@@ -883,7 +897,7 @@ def index():
     for d in decisions_raw:
         decisions.append({
             "time_str": _kst_str(d.get("ts", time.time())),
-            "event": d.get("event", "?"),
+            "event": _decision_event_label(d),
             "summary": _decision_summary(d),
         })
 
