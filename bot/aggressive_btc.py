@@ -1,5 +1,7 @@
 """Standalone aggressive scalp strategy, run independently per symbol (see
-AGGRESSIVE_CONFIGS below: SOXLUSDT plus 10 non-leveraged tokenized US stocks).
+AGGRESSIVE_CONFIGS below: SOXLUSDT plus 38 non-leveraged tokenized US stocks,
+split across two themed news pools -- SEMI_AI_CONFIGS for semiconductor/
+AI-infrastructure names, STOCK_CONFIGS for everything else).
 
 Deliberately SEPARATE from bot/strategy.py (the main, conservative
 multi-symbol system this whole codebase was built around) -- different risk
@@ -10,8 +12,8 @@ All configured symbols share this one state file (StateStore's trades/
 skip_reasons are already keyed by symbol) and one Bybit client/notifier;
 each gets its own SymbolConfig (leverage range, weights, etc), but
 PolymarketSignal/NewsSignal instances are shared across symbols whose cfg
-dicts are identical (see main()'s _signal_cache) so the 10 stock symbols
-don't each independently re-fetch the same general-market RSS feeds.
+dicts are identical (see main()'s _signal_cache) so the ~20 symbols in each
+stock news pool don't each independently re-fetch the same RSS feeds.
 
 SOXLUSDT is NOT a plain coin -- it's a tokenized 3x leveraged semiconductor-
 index ETF. The main bot's config.yaml excludes it from its own universe scan
@@ -20,26 +22,29 @@ token has been observed live diverging from what entry/exit price * qty *
 leverage alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4%
 price move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math
 would predict -- SNXXUSDT was tried here and then removed from this module
-for exactly that unpredictability). The 10 stock symbols below are
+for exactly that unpredictability). The 38 stock symbols below are
 DELIBERATELY NOT this kind of product -- they're Bybit's 1x tokenized-stock
 perpetuals (e.g. AAPLUSDT tracks Apple's share price directly, no embedded
 multiplier), chosen specifically to avoid the embedded-leverage risk that
-made SNXXUSDT's behavior unreliable. The exact ticker list below is my best
-recollection of Bybit's tokenized-stock lineup, not something this sandboxed
-session could verify against Bybit's live API (outbound access to
-api.bybit.com is blocked by this environment's network policy) -- see
+made SNXXUSDT's behavior unreliable. The first 10 were confirmed directly
+against screenshots of Bybit's own listing; the other 28 were not (this
+sandboxed session can't reach api.bybit.com itself to verify) -- see
 main()'s startup validation, which queries get_instrument_info() for every
 configured symbol and skips (with a logged warning + notifier message,
 rather than crashing) any ticker that turns out not to exist or not be
-tradable. Check the dashboard after a deploy to see which of the 10 actually
-came up; any missing one needs its ticker corrected against the Bybit app.
+tradable. Check the dashboard after a deploy to see which actually came up;
+any missing one needs its ticker corrected against the Bybit app.
 
-Because all 11 symbols independently look for entry signals every tick, this
+Because all 39 symbols independently look for entry signals every tick, this
 module enforces a GLOBAL cap of exactly one open position at a time across
 all of them (see try_enter()'s check of state.open_trade_count()) -- a
 deliberate choice (over e.g. letting several symbols size down to minimum
 margin at once) so the existing 50%-of-equity-per-trade sizing never has to
-be shared or diluted across concurrent positions.
+be shared or diluted across concurrent positions. With 39 symbols each doing
+its own kline fetch every tick (POLL_SEC=30s), one tick loop iteration now
+makes ~39 sequential Bybit API calls before sleeping -- still fine against
+Bybit's public rate limits and POLL_SEC's own headroom, but worth knowing if
+the loop is ever observed falling behind real time.
 
 Design, as specified (per symbol, via SymbolConfig):
   1. 1-hour candles, target +12% ROI (on margin) per trade.
@@ -66,7 +71,7 @@ Design, as specified (per symbol, via SymbolConfig):
      stretch must never push leverage past this, since a sudden move hits
      hardest exactly when leverage was raised to compensate for the
      apparent calm). SOXLUSDT: [6x, 10x] (lowered from the original BTC
-     design's 24x/25x because it carries embedded 3x leverage). The 10 stock
+     design's 24x/25x because it carries embedded 3x leverage). All 38 stock
      symbols: [8x, 15x] -- higher than SOXLUSDT since there's no embedded
      multiplier distorting the TP/SL math, but still well under the original
      24x/25x crypto design since this is a brand-new asset class for this
@@ -193,9 +198,9 @@ SOXL_CONFIG = SymbolConfig(
 
 # Shared by every stock SymbolConfig below (same object, not just same
 # content) so main()'s signal-instance cache gives them all ONE NewsSignal/
-# PolymarketSignal instance -- 10 symbols asking "what's relevant to me"
-# against one shared, once-per-refresh-interval article pool, instead of
-# each independently re-fetching the same general finance feeds.
+# PolymarketSignal instance -- every symbol in a pool asking "what's relevant
+# to me" against one shared, once-per-refresh-interval article pool, instead
+# of each independently re-fetching the same general finance feeds.
 #
 # Deliberately general-market feeds rather than one dedicated feed per
 # company: these are all large, frequently-covered companies, so their news
@@ -226,38 +231,87 @@ _STOCK_NEWS_CFG = {
     "max_articles": 80,  # higher than SOXL's 60 -- one shared pool now needs to cover 10 different companies
 }
 
+# Second themed news pool, SEPARATE from SOXL_CONFIG's own news_cfg (not
+# reused -- SOXL's feed/query tuning stays untouched) but built the same
+# way: semiconductor feeds broadened to cover "AI infrastructure" more
+# generally (data center, optical networking, servers) since several of the
+# 20 symbols below (CIENUSDT/LITEUSDT/COHRUSDT = optical networking,
+# SMCIUSDT/DELLUSDT/HPEUSDT/ANETUSDT = AI servers/enterprise networking)
+# aren't literally chip-fab companies and would get little relevant coverage
+# from a strictly semiconductor-worded feed set.
+_SEMI_AI_NEWS_CFG = {
+    "feeds": [
+        "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # CNBC Technology
+        "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # CNBC Markets
+        "https://www.nasdaq.com/feed/rssoutbound?category=Semiconductors",  # Nasdaq Semiconductors category
+        "https://www.investing.com/rss/news_25.rss",              # Investing.com stock market news
+        "https://www.benzinga.com/feed",                          # Benzinga market news
+        "https://finance.yahoo.com/news/rssindex",                # Yahoo Finance
+        "https://techcrunch.com/feed/",                           # TechCrunch
+        "https://www.zdnet.com/news/rss.xml",                     # ZDNet
+        "https://news.google.com/rss/search?q=semiconductor+OR+%22AI+infrastructure%22+OR+%22data+center%22+OR+%22AI+chips%22&hl=en-US&gl=US&ceid=US:en",
+    ],
+    "newsapi_query": "semiconductor OR \"AI infrastructure\" OR \"data center\" OR \"AI chips\" OR networking",
+    "refresh_minutes": 15,
+    "lookback_hours": 12,
+    "max_articles": 100,  # shared by 20 companies -- needs more headroom than the SOXL-only pool
+}
+
 # Bybit's 1x tokenized-stock USDT perpetuals (TradFi > Futures > Stocks in
-# the app) -- confirmed directly against screenshots of that listing (this
-# sandboxed session can't reach api.bybit.com itself to verify). Two names
-# differ from the obvious guess: Bybit lists TSMC as TSMUSDT (not TSMCUSDT)
-# and AMD's stock token as AMDSTOCKUSDT (not AMDUSDT, likely to avoid
-# colliding with a crypto-named listing) -- neither is used below, but worth
-# knowing if more symbols get added later. main()'s startup validation still
-# drops any symbol that turns out not to be tradable rather than crashing,
-# as a backstop against the list drifting out of date.
-STOCK_SYMBOLS = [
-    "AAPLUSDT", "TSLAUSDT", "NVDAUSDT", "AMZNUSDT", "GOOGLUSDT",
-    "METAUSDT", "MSFTUSDT", "AVGOUSDT", "COINUSDT", "MSTRUSDT",
+# the app) -- the first 10 (AAPL/TSLA/NVDA/AMZN/GOOGL/META/MSFT/AVGO/COIN/
+# MSTR) were confirmed directly against screenshots of that listing; the 28
+# below were supplied directly rather than screenshotted, so they're NOT
+# independently confirmed the same way (this sandboxed session still can't
+# reach api.bybit.com to check itself). main()'s startup validation drops
+# any symbol that turns out not to be tradable rather than crashing, as a
+# backstop against a wrong/outdated ticker among these. Two names differ
+# from the obvious guess that I know of: Bybit lists TSMC as TSMUSDT (not
+# TSMCUSDT, used correctly below) and AMD's stock token as AMDSTOCKUSDT (not
+# AMDUSDT -- not used here, but worth knowing if AMD gets added later).
+#
+# Split into two groups so the "테마에 대한 뉴스" (theme-relevant news) request
+# gets two differently-tuned news pools rather than one generic one:
+# semiconductor/AI-infrastructure names (their own vocabulary -- chips, data
+# centers, export controls -- that general market feeds rarely use) vs.
+# everything else (big tech/software, space/defense, consumer -- all
+# large/well-covered names that show up reliably in general finance
+# headlines already).
+SEMI_AI_SYMBOLS = [
+    "NVDAUSDT", "AVGOUSDT",  # moved here from the general pool -- both ARE semiconductor companies
+    "TSMUSDT", "MUUSDT", "INTCUSDT", "AMATUSDT", "KLACUSDT", "LRCXUSDT",
+    "MRVLUSDT", "ADIUSDT", "CRDOUSDT", "COHRUSDT", "LITEUSDT", "CIENUSDT",
+    "ALABUSDT", "AEHRUSDT", "SMCIUSDT", "DELLUSDT", "HPEUSDT", "ANETUSDT",
 ]
 
-STOCK_CONFIGS: list[SymbolConfig] = [
-    SymbolConfig(
+STOCK_SYMBOLS = [
+    "AAPLUSDT", "TSLAUSDT", "AMZNUSDT", "GOOGLUSDT", "METAUSDT", "MSFTUSDT",
+    "COINUSDT", "MSTRUSDT", "ORCLUSDT",
+    "RKLBUSDT", "RDWUSDT", "RIVNUSDT", "DKNGUSDT", "DJTUSDT",
+    "COSTUSDT", "HDUSDT", "MNSTUSDT", "SONYUSDT",
+]
+
+
+def _make_stock_config(sym: str, news_cfg: dict) -> SymbolConfig:
+    # No embedded leverage to distort the TP/SL math (unlike SOXLUSDT/the
+    # removed SNXXUSDT) -- a somewhat higher range is reasonable, but kept
+    # well under the original 24x/25x crypto design since this is a
+    # brand-new asset class for this bot and real stocks can gap sharply on
+    # earnings/news between 1h candles. Same treatment for every stock
+    # symbol regardless of theme/pool.
+    return SymbolConfig(
         symbol=sym,
-        # No embedded leverage to distort the TP/SL math (unlike SOXLUSDT/
-        # the removed SNXXUSDT) -- a somewhat higher range is reasonable, but
-        # kept well under the original 24x/25x crypto design since this is a
-        # brand-new asset class for this bot and real stocks can gap sharply
-        # on earnings/news between 1h candles.
         min_leverage=8.0, max_leverage=15.0, leverage_hard_cap=15.0,
         min_confidence_to_enter=0.4,
         tech_weight=0.15, volume_weight=0.15, poly_weight=0.0, news_weight=0.70,
         polymarket_cfg=_STOCK_POLYMARKET_CFG,
-        news_cfg=_STOCK_NEWS_CFG,
+        news_cfg=news_cfg,
     )
-    for sym in STOCK_SYMBOLS
-]
 
-AGGRESSIVE_CONFIGS: list[SymbolConfig] = [SOXL_CONFIG] + STOCK_CONFIGS
+
+SEMI_AI_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _SEMI_AI_NEWS_CFG) for sym in SEMI_AI_SYMBOLS]
+STOCK_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _STOCK_NEWS_CFG) for sym in STOCK_SYMBOLS]
+
+AGGRESSIVE_CONFIGS: list[SymbolConfig] = [SOXL_CONFIG] + SEMI_AI_CONFIGS + STOCK_CONFIGS
 
 # Backward-compat alias: the strategy was originally SOXLUSDT-only, and a few
 # places (dashboard's default /backtest symbol, old references) still want
@@ -704,7 +758,7 @@ def main():
     state.save()
     log_dir = os.getenv("LOG_DIR", "logs")  # same shared decisions.jsonl the main bot and dashboard use
 
-    # The 10 stock tickers in STOCK_SYMBOLS are a best guess, not verified
+    # Many of the configured stock tickers aren't independently verified
     # against Bybit's live API (see module docstring) -- check each one
     # exists/is tradable before building a strategy for it, so a wrong or
     # delisted ticker just gets skipped (logged + notified) instead of
@@ -724,9 +778,10 @@ def main():
         notifier.send(f"[aggressive_btc] 아래 심볼은 거래소에서 확인되지 않아 제외됨: {', '.join(invalid_symbols)}")
 
     # Signal instances are shared across configs whose cfg dict is the SAME
-    # object (e.g. all 10 stock configs point at the same _STOCK_NEWS_CFG) --
-    # keyed by id() so those 10 symbols fetch the shared RSS/Polymarket pool
-    # only once per refresh interval, not once each.
+    # object (e.g. all STOCK_CONFIGS point at the same _STOCK_NEWS_CFG, all
+    # SEMI_AI_CONFIGS at the same _SEMI_AI_NEWS_CFG) -- keyed by id() so each
+    # pool's symbols fetch their shared RSS/Polymarket pool only once per
+    # refresh interval, not once each.
     poly_cache: dict[int, PolymarketSignal] = {}
     news_cache: dict[int, NewsSignal] = {}
     strategies = []

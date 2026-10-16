@@ -131,7 +131,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
 
 def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
-    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 10 stock tokens) --
+    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 38 stock tokens) --
     empty list if that module has never run (no state file yet), so this
     section simply doesn't render rather than showing an empty shell forever.
     All configured symbols share ONE state file (StateStore's trades/history/

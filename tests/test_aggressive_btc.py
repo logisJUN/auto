@@ -1,5 +1,5 @@
 """bot/aggressive_btc.py: a standalone, SEPARATE multi-symbol aggressive
-strategy (SOXLUSDT plus 10 non-leveraged stock tokens; 12% target / 1h, -5%
+strategy (SOXLUSDT plus 38 non-leveraged stock tokens; 12% target / 1h, -5%
 SL, hourly negative-ROI cutoff, 50% margin per trade, global cap of one open
 position at a time across every configured symbol). Deliberately isolated
 from the main bot/strategy.py -- these tests cover its own pure logic and its
@@ -30,22 +30,35 @@ from bot.state import StateStore
 
 # -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
 
-def test_aggressive_configs_has_soxl_plus_ten_distinct_stock_symbols():
+def test_aggressive_configs_has_soxl_plus_38_distinct_stock_symbols_across_two_pools():
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
     assert symbols[0] == "SOXLUSDT"
     assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
-    assert len(symbols) == 11
-    assert len(set(symbols)) == 11  # no duplicates
+    assert len(symbols) == 39
+    assert len(set(symbols)) == 39  # no duplicates
 
+    semi_ai_configs = aggressive_btc.SEMI_AI_CONFIGS
     stock_configs = aggressive_btc.STOCK_CONFIGS
-    assert len(stock_configs) == 10
-    for sc in stock_configs:
+    assert len(semi_ai_configs) == 20
+    assert len(stock_configs) == 18
+    assert "NVDAUSDT" in [sc.symbol for sc in semi_ai_configs]
+    assert "AVGOUSDT" in [sc.symbol for sc in semi_ai_configs]  # moved from the general pool -- it's a chipmaker too
+
+    for sc in semi_ai_configs + stock_configs:
         # No embedded leverage on these (unlike SOXLUSDT) -- allowed a higher
         # range, but still well under the original 24x/25x crypto design.
         assert sc.min_leverage == 8.0
         assert sc.max_leverage == 15.0
         assert sc.leverage_hard_cap == 15.0
         assert sc.margin_pct_of_equity == 50.0  # safe only because of the global 1-position cap
+
+    # The two pools use genuinely different news_cfg objects (separate RSS
+    # pools/NewsSignal instances), not just coincidentally-equal dicts.
+    semi_ai_news_ids = {id(sc.news_cfg) for sc in semi_ai_configs}
+    stock_news_ids = {id(sc.news_cfg) for sc in stock_configs}
+    assert len(semi_ai_news_ids) == 1
+    assert len(stock_news_ids) == 1
+    assert semi_ai_news_ids != stock_news_ids
 
 
 # -- compute_leverage ---------------------------------------------------------

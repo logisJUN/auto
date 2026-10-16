@@ -47,21 +47,52 @@ SYMBOL_KEYWORDS = {
                  "nvidia", "amd", "tsmc", "intel", "qualcomm", "broadcom",
                  "philadelphia semiconductor", "sox index", "export controls",
                  "chip ban", "chip export"],
-    # The 10 below are Bybit's 1x tokenized-stock perpetuals (aggressive_btc's
-    # STOCK_SYMBOLS) -- relevant news is about the company itself, not a
+    # Bybit's 1x tokenized-stock perpetuals (aggressive_btc's STOCK_CONFIGS/
+    # SEMI_AI_CONFIGS) -- relevant news is about the company itself, not a
     # bare ticker-as-word match that would pick up unrelated articles (e.g.
-    # not bare "meta" or "coin", which collide with unrelated usage).
+    # not bare "meta"/"coin"/"intel"/"oracle", which collide with unrelated
+    # usage -- "intel"/"oracle" especially, both common English words with
+    # their own unrelated meanings in general news/crypto coverage).
     "AAPLUSDT": ["apple", "aapl", "iphone", "tim cook", "ipad", "macbook"],
     "TSLAUSDT": ["tesla", "tsla", "elon musk", "cybertruck", "model y", "model 3"],
-    "NVDAUSDT": ["nvidia", "nvda", "jensen huang", "gpu", "h100", "blackwell"],
     "AMZNUSDT": ["amazon", "amzn", "aws", "jeff bezos", "andy jassy"],
     "GOOGLUSDT": ["google", "alphabet", "googl", "sundar pichai", "youtube"],
     "METAUSDT": ["meta platforms", "facebook", "instagram", "zuckerberg",
                  "whatsapp", "reality labs"],
     "MSFTUSDT": ["microsoft", "msft", "satya nadella", "azure", "windows", "copilot"],
-    "AVGOUSDT": ["broadcom", "avgo", "hock tan"],
     "COINUSDT": ["coinbase", "brian armstrong", "coinbase global"],
     "MSTRUSDT": ["microstrategy", "mstr", "michael saylor", "strategy inc"],
+    "ORCLUSDT": ["oracle corporation", "oracle cloud", "oracle ceo", "larry ellison", "safra catz"],
+    "RKLBUSDT": ["rocket lab", "peter beck"],
+    "RDWUSDT": ["redwire", "redwire space"],
+    "RIVNUSDT": ["rivian", "rivian automotive"],
+    "DKNGUSDT": ["draftkings"],
+    "DJTUSDT": ["trump media", "truth social"],
+    "COSTUSDT": ["costco", "costco wholesale"],
+    "HDUSDT": ["home depot"],
+    "MNSTUSDT": ["monster beverage"],
+    "SONYUSDT": ["sony group", "sony corporation", "playstation"],
+    # Semiconductor / AI-infrastructure pool (aggressive_btc.SEMI_AI_CONFIGS)
+    "NVDAUSDT": ["nvidia", "nvda", "jensen huang", "gpu", "h100", "blackwell"],
+    "AVGOUSDT": ["broadcom", "avgo", "hock tan"],
+    "TSMUSDT": ["tsmc", "taiwan semiconductor"],
+    "MUUSDT": ["micron", "micron technology"],
+    "INTCUSDT": ["intel corporation", "intel corp", "intel foundry", "intel ceo", "lip-bu tan"],
+    "AMATUSDT": ["applied materials"],
+    "KLACUSDT": ["kla corporation", "kla corp"],
+    "LRCXUSDT": ["lam research"],
+    "MRVLUSDT": ["marvell", "marvell technology"],
+    "ADIUSDT": ["analog devices"],
+    "CRDOUSDT": ["credo technology"],
+    "COHRUSDT": ["coherent corp", "coherent corporation"],
+    "LITEUSDT": ["lumentum"],
+    "CIENUSDT": ["ciena", "ciena corporation"],
+    "ALABUSDT": ["astera labs"],
+    "AEHRUSDT": ["aehr test systems"],
+    "SMCIUSDT": ["super micro computer", "supermicro", "smci"],
+    "DELLUSDT": ["dell technologies", "dell inc", "michael dell", "dell "],
+    "HPEUSDT": ["hewlett packard enterprise"],
+    "ANETUSDT": ["arista networks"],
 }
 
 
