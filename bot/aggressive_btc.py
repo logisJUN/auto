@@ -92,6 +92,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
+from bot.aggressive_btc_settings import ENTRY_THRESHOLD
 from bot.config import Secrets, load_config
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.logger import log_decision
@@ -111,17 +112,6 @@ TESTNET = False   # <-- flip this one line to go live. See module docstring.
 # -- shared across every configured symbol ---------------------------------------------------------
 TIMEFRAME = "60"                # Bybit kline interval string for 1-hour candles
 HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
-# |blended score| needed to enter a position, in either direction -- change
-# THIS ONE LINE to retune every configured symbol's entry sensitivity at
-# once (SOXL_CONFIG and _make_stock_config's SymbolConfigs below both read
-# it). Lowering it trades more often on weaker signals; raising it trades
-# less often but only on stronger ones. Was raised to this from 0.5 for
-# SOXLUSDT specifically because at 0.5, 1h SOXLUSDT rarely produced a strong
-# enough blended score to enter at all (observed live: a +0.34 blend sat
-# under the bar for hours) -- before changing it, backtest the new value via
-# the dashboard's /backtest page (its own entry_threshold field, independent
-# of this constant) to see how it would have performed historically.
-ENTRY_THRESHOLD = 0.4
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
