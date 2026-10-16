@@ -522,61 +522,34 @@ TEMPLATE = """
   </div>
   {% endif %}
 
-  {% for agg in aggressive_list %}
+  {% if aggressive_list %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive {{ agg.symbol }} (별도 전략)</h2>
-    {% if agg.position %}
+    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 동시 1포지션 제한)</h2>
     <table>
-      <tr><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th>
-          <th>미실현손익</th><th>ROI%</th><th>경과</th></tr>
+      <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(7일)</th><th>거래수</th><th></th></tr>
+      {% for agg in aggressive_list %}
       <tr>
-        <td class="{{ 'pos-long' if agg.position.side == 'long' else 'pos-short' }}">
-          {{ agg.position.side.upper() }}</td>
-        <td>{{ '%.1f'|format(agg.position.leverage) }}x</td>
-        <td>{{ agg.position.qty }}</td>
-        <td>{{ agg.position.entry_price }}</td>
-        <td>{{ agg.position.last_price }}</td>
-        <td>{{ '%.2f'|format(agg.position.current_sl) }}</td>
-        <td>{{ '%.2f'|format(agg.position.current_tp) }}</td>
-        <td class="{{ 'pnl-pos' if agg.position.unrealized >= 0 else 'pnl-neg' }}">
-          {{ '%.4f'|format(agg.position.unrealized) }}</td>
-        <td class="{{ 'pnl-pos' if agg.position.roi_pct >= 0 else 'pnl-neg' }}">
-          {{ '%+.2f'|format(agg.position.roi_pct) }}%</td>
-        <td class="small">{{ '%.1f'|format(agg.position.hours_open) }}h</td>
-      </tr>
-    </table>
-    {% else %}
-    <div class="small">{{ agg.skip_reason if agg.skip_reason else '현재 열린 포지션 없음 - 진입 신호 대기 중' }}</div>
-    {% endif %}
-    <div class="grid" style="margin-top:8px;">
-      <div><div class="stat-label">누적 손익 (로컬 기록)</div><div class="stat-value {{ 'pnl-pos' if agg.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.cumulative_pnl) }}</div></div>
-      <div><div class="stat-label">청산된 거래</div><div class="stat-value">{{ agg.trade_count }}건</div></div>
-      {% if agg.exchange_pnl_7d is not none %}
-      <div><div class="stat-label">거래소 기준 손익 (최근 7일)</div><div class="stat-value {{ 'pnl-pos' if agg.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.exchange_pnl_7d) }}</div></div>
-      {% endif %}
-    </div>
-    <div class="small">배포/재시작으로 로컬 기록이 리셋돼도 "거래소 기준" 값은 Bybit 자체 체결 내역에서 다시 계산되므로 유지됩니다 (단, 최근 7일 이전 거래는 집계되지 않음).</div>
-    {% if agg.history %}
-    <table style="margin-top:8px;">
-      <tr><th>시각</th><th>방향</th><th>진입가</th><th>레버리지</th><th>손익</th><th>ROI%</th><th>사유</th></tr>
-      {% for t in agg.history %}
-      <tr>
-        <td class="small">{{ t.time_str }}</td>
-        <td class="{{ 'pos-long' if t.side == 'long' else 'pos-short' }}">{{ t.side.upper() }}</td>
-        <td>{{ t.entry_price }}</td>
-        <td>{{ '%.1f'|format(t.leverage) if t.leverage else '-' }}x</td>
-        <td class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(t.pnl) }}{{ ' (est.)' if t.pnl_is_estimate else '' }}</td>
-        <td class="{{ 'pnl-pos' if t.roi_pct is not none and t.roi_pct >= 0 else 'pnl-neg' }}">
-          {{ '%+.2f'|format(t.roi_pct) + '%' if t.roi_pct is not none else '-' }}</td>
-        <td class="small">{{ t.reason }}</td>
+        <td>{{ agg.symbol }}</td>
+        <td>
+          {% if agg.position %}
+          <span class="{{ 'pos-long' if agg.position.side == 'long' else 'pos-short' }}">{{ agg.position.side.upper() }}</span>
+          {{ '%.1f'|format(agg.position.leverage) }}x
+          <span class="{{ 'pnl-pos' if agg.position.roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(agg.position.roi_pct) }}%</span>
+          {% else %}
+          <span class="small">관망</span>
+          {% endif %}
+        </td>
+        <td class="{{ 'pnl-pos' if agg.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.cumulative_pnl) }}</td>
+        <td class="{{ 'pnl-pos' if agg.exchange_pnl_7d is not none and agg.exchange_pnl_7d >= 0 else 'pnl-neg' }}">
+          {{ '%.4f'|format(agg.exchange_pnl_7d) if agg.exchange_pnl_7d is not none else '-' }}</td>
+        <td>{{ agg.trade_count }}</td>
+        <td class="small"><a href="/backtest?token={{ token }}&symbol={{ agg.symbol }}">백테스트</a></td>
       </tr>
       {% endfor %}
     </table>
-    {% endif %}
-    <div class="small">메인 봇과 완전히 분리된 별도 상태 파일을 사용하며, aggressive_btc 내 모든 심볼이 동시엔 1개까지만 포지션을 보유합니다.</div>
-    <div class="small" style="margin-top:6px;"><a href="/backtest?token={{ token }}&symbol={{ agg.symbol }}">기술+거래량 공식 백테스트 →</a></div>
+    <div class="small" style="margin-top:6px;">메인 봇과 분리된 별도 상태 파일 사용. 각 심볼의 상세 신호/점수는 아래 "최근 판단 로그"에서 확인하세요. 배포/재시작 시 로컬 기록은 리셋되지만 거래소손익(7일)은 Bybit 체결 내역 기준이라 유지됩니다.</div>
   </div>
-  {% endfor %}
+  {% endif %}
 
   <div class="card">
     <h2 style="font-size:1rem;">최근 판단 로그</h2>
@@ -676,25 +649,23 @@ def _decision_summary(d: dict) -> str:
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 
-def _mark_closest_to_thresholds(decisions: list[dict], threshold: float = 0.4) -> None:
-    """Flags (in place) the one signal_check row whose score is closest to
-    -threshold and the one closest to +threshold with a "highlight" field --
-    with 39 symbols' worth of "관망" rows in the log, these two are the ones
-    nearest to actually crossing min_confidence_to_enter and triggering a
-    trade, worth drawing the eye to. The two are forced distinct (the
-    short-side pick is excluded before picking the long-side one) so a
-    single row showing both a near-threshold score AND being the only
-    signal_check row doesn't end up claimed by both.
+def _mark_extreme_scores(decisions: list[dict]) -> None:
+    """Flags (in place) the signal_check row with the single LOWEST score
+    (most negative -- red/bold) and the one with the single HIGHEST score
+    (most positive -- blue/bold). With 39 symbols' worth of "관망" rows in
+    the log, these two are the current extremes, worth drawing the eye to.
+    Forced distinct (the lowest pick is excluded before picking the
+    highest) so a one-row list can't get claimed by both.
     """
     candidates = [i for i, d in enumerate(decisions) if d.get("event_raw") == "signal_check" and d.get("score") is not None]
     if not candidates:
         return
-    short_idx = min(candidates, key=lambda i: abs(decisions[i]["score"] - (-threshold)))
-    decisions[short_idx]["highlight"] = "short"
-    remaining = [i for i in candidates if i != short_idx]
+    lowest_idx = min(candidates, key=lambda i: decisions[i]["score"])
+    decisions[lowest_idx]["highlight"] = "short"
+    remaining = [i for i in candidates if i != lowest_idx]
     if remaining:
-        long_idx = min(remaining, key=lambda i: abs(decisions[i]["score"] - threshold))
-        decisions[long_idx]["highlight"] = "long"
+        highest_idx = max(remaining, key=lambda i: decisions[i]["score"])
+        decisions[highest_idx]["highlight"] = "long"
 
 
 def _decision_event_label(d: dict) -> str:
@@ -958,9 +929,26 @@ def index():
     total_unrealized = sum(p["unrealized"] for p in positions)
 
     log_dir = os.getenv("LOG_DIR", "logs")
-    decisions_raw = read_recent_decisions(log_dir, limit=30)
-    decisions = []
+    # Wide enough to contain at least one signal_check per currently-configured
+    # aggressive_btc symbol (39 of them, each logging roughly once per
+    # SIGNAL_LOG_INTERVAL_SEC=5min, all close together in time since they
+    # share one tick loop) -- read_recent_decisions returns newest-first, so
+    # the dedup below (first occurrence wins) keeps each symbol's MOST RECENT
+    # reading and drops older ones, same as if the log only ever showed the
+    # current state. Raising this is cheap (a local text-file tail, no API call).
+    decisions_raw = read_recent_decisions(log_dir, limit=400)
+    seen_signal_symbols = set()
+    deduped_raw = []
     for d in decisions_raw:
+        if d.get("event") == "signal_check":
+            sym = d.get("symbol")
+            if sym in seen_signal_symbols:
+                continue
+            seen_signal_symbols.add(sym)
+        deduped_raw.append(d)
+
+    decisions = []
+    for d in deduped_raw:
         decisions.append({
             "time_str": _kst_str(d.get("ts", time.time())),
             "event": _decision_event_label(d),
@@ -968,7 +956,7 @@ def index():
             "event_raw": d.get("event"),
             "score": d.get("score"),
         })
-    _mark_closest_to_thresholds(decisions)
+    _mark_extreme_scores(decisions)
 
     main_bot_enabled = _main_bot_enabled()
     watched_symbols = cfg.get("exchange", "symbols", default=[]) if main_bot_enabled else []

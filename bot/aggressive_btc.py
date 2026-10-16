@@ -56,7 +56,10 @@ Design, as specified (per symbol, via SymbolConfig):
      always contributes 0, same as for any non-BTC/ETH symbol in the main
      bot. News (see news_cfg) is RSS feeds + an optional NewsAPI query,
      filtered per-symbol via news.SYMBOL_KEYWORDS, scored the same way as
-     the main bot's crypto news signal.
+     the main bot's crypto news signal. A direction crossing
+     ENTRY_THRESHOLD must be seen on two consecutive checks before it's
+     actually acted on (see try_enter()'s _pending_entry) -- filters a
+     single noisy tick that reverses right back from triggering a trade.
   4. Stop-loss at -5% ROI.
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
@@ -446,6 +449,12 @@ class AggressiveBTCStrategy:
         self.symbol = cfg.symbol
         self.log_dir = log_dir
         self._last_signal_log_ts = 0.0
+        # Entry confirmation: the direction seen on the PREVIOUS non-neutral
+        # tick, cleared the moment the signal goes neutral or the direction
+        # flips. try_enter() only actually places an order once the SAME
+        # direction has been seen on two consecutive checks -- see
+        # try_enter()'s use of this for why.
+        self._pending_entry: dict | None = None
 
     # -- signal ---------------------------------------------------------
     def get_signal(self) -> dict:
@@ -505,7 +514,7 @@ class AggressiveBTCStrategy:
     def try_enter(self):
         if self.state.get_trade(self.symbol) is not None:
             return
-        # Global cap: only one of the 11 configured symbols may be in a
+        # Global cap: only one of the 39 configured symbols may be in a
         # position at a time (see module docstring) -- this symbol has no
         # open trade (checked above), so open_trade_count() > 0 here means
         # some OTHER symbol currently does.
@@ -527,10 +536,27 @@ class AggressiveBTCStrategy:
             self.state.set_skip_reason(self.symbol, "가격/ATR 데이터 없음")
             return
         if signal["direction"] == "neutral":
+            self._pending_entry = None  # any earlier pending confirmation no longer applies
             self.state.set_skip_reason(
                 self.symbol, f"관망 중 - 신호 약함 ({self._format_signal_breakdown(signal)}, "
                              f"기준 ±{self.cfg.min_confidence_to_enter:.2f})")
             return
+
+        # Entry confirmation: don't act on the very first tick a direction
+        # crosses the threshold -- a lower ENTRY_THRESHOLD trades on weaker
+        # signals, which makes a single noisy tick (that reverses right back
+        # on the next check) more likely to trigger an entry that immediately
+        # loses. Requiring the SAME direction on two consecutive checks
+        # filters that out, at the cost of entering one check later than the
+        # threshold itself was crossed.
+        direction = signal["direction"]
+        if self._pending_entry is None or self._pending_entry.get("direction") != direction:
+            self._pending_entry = {"direction": direction}
+            self.state.set_skip_reason(
+                self.symbol, f"{direction} 1차 확인됨 - 다음 체크에서 같은 방향 유지되면 진입 "
+                             f"({self._format_signal_breakdown(signal)})")
+            return
+        self._pending_entry = None  # confirmed -- proceed to the actual entry below
 
         equity = self.client.get_equity_usdt()
         margin = equity * (self.cfg.margin_pct_of_equity / 100.0)
