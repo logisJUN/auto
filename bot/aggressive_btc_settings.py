@@ -15,4 +15,4 @@ strategy logic. Currently just the one: ENTRY_THRESHOLD.
 # Before changing it, backtest the new value via the dashboard's /backtest
 # page (its own entry_threshold field there is independent of this one -- it
 # lets you try a value against real history without touching live trading).
-ENTRY_THRESHOLD = 0.4
+ENTRY_THRESHOLD = 0.2
