@@ -92,7 +92,9 @@ import os
 import time
 from dataclasses import dataclass, field
 
-from bot.aggressive_btc_settings import ENTRY_THRESHOLD
+# Top-level module (repo root, not inside bot/) so it's the one file you open
+# to retune entry sensitivity without digging through strategy code.
+from aggressive_btc_settings import ENTRY_THRESHOLD
 from bot.config import Secrets, load_config
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.logger import log_decision
