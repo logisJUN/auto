@@ -322,6 +322,8 @@ TEMPLATE = """
   th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
   .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
   .small { color:#8b949e; font-size:0.75rem; }
+  .hl-short { color:#ff7b72; font-weight:700; }
+  .hl-long { color:#58a6ff; font-weight:700; }
   .copy-btn { float:right; background:#21262d; color:#e6edf3; border:1px solid #30363d;
               border-radius:6px; padding:6px 12px; font-size:0.85rem; }
   .copy-btn:active { background:#30363d; }
@@ -581,7 +583,7 @@ TEMPLATE = """
       <tr>
         <td class="small">{{ d.time_str }}</td>
         <td>{{ d.event }}</td>
-        <td class="small">{{ d.summary }}</td>
+        <td class="small {{ 'hl-short' if d.highlight == 'short' else ('hl-long' if d.highlight == 'long' else '') }}">{{ d.summary }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -669,6 +671,27 @@ def _decision_summary(d: dict) -> str:
     if event == "started":
         return f"{d.get('symbol')} 프로세스 시작됨 ({d.get('mode')})"
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
+
+
+def _mark_closest_to_thresholds(decisions: list[dict], threshold: float = 0.4) -> None:
+    """Flags (in place) the one signal_check row whose score is closest to
+    -threshold and the one closest to +threshold with a "highlight" field --
+    with 39 symbols' worth of "관망" rows in the log, these two are the ones
+    nearest to actually crossing min_confidence_to_enter and triggering a
+    trade, worth drawing the eye to. The two are forced distinct (the
+    short-side pick is excluded before picking the long-side one) so a
+    single row showing both a near-threshold score AND being the only
+    signal_check row doesn't end up claimed by both.
+    """
+    candidates = [i for i, d in enumerate(decisions) if d.get("event_raw") == "signal_check" and d.get("score") is not None]
+    if not candidates:
+        return
+    short_idx = min(candidates, key=lambda i: abs(decisions[i]["score"] - (-threshold)))
+    decisions[short_idx]["highlight"] = "short"
+    remaining = [i for i in candidates if i != short_idx]
+    if remaining:
+        long_idx = min(remaining, key=lambda i: abs(decisions[i]["score"] - threshold))
+        decisions[long_idx]["highlight"] = "long"
 
 
 def _decision_event_label(d: dict) -> str:
@@ -899,7 +922,10 @@ def index():
             "time_str": _kst_str(d.get("ts", time.time())),
             "event": _decision_event_label(d),
             "summary": _decision_summary(d),
+            "event_raw": d.get("event"),
+            "score": d.get("score"),
         })
+    _mark_closest_to_thresholds(decisions)
 
     main_bot_enabled = _main_bot_enabled()
     watched_symbols = cfg.get("exchange", "symbols", default=[]) if main_bot_enabled else []
