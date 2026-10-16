@@ -385,18 +385,21 @@ TEMPLATE = """
       <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현손익</th></tr>
       {% for p in positions %}
       <tr>
-        <td>{{ p.symbol }}</td>
+        <td>{{ p.symbol }}{% if p.manual %} <span class="small">(수동)</span>{% endif %}</td>
         <td class="{{ 'pos-long' if p.side == 'long' else 'pos-short' }}">{{ p.side.upper() }}</td>
-        <td>{{ p.leverage }}x ({{ '%.1f'|format(p.margin_pct) }}%)</td>
+        <td>{% if p.leverage %}{{ '%.1f'|format(p.leverage) }}x{% if p.margin_pct is not none %} ({{ '%.1f'|format(p.margin_pct) }}%){% endif %}{% else %}-{% endif %}</td>
         <td>{{ p.qty }}</td>
         <td>{{ p.entry_price }}</td>
         <td>{{ p.last_price }}</td>
-        <td>{{ p.current_sl }} ({{ '%+.2f'|format(p.sl_pct) }}%)</td>
-        <td>{{ p.current_tp }} ({{ '%+.2f'|format(p.tp_pct) }}%)</td>
+        <td>{% if p.current_sl %}{{ p.current_sl }} ({{ '%+.2f'|format(p.sl_pct) }}%){% else %}미설정{% endif %}</td>
+        <td>{% if p.current_tp %}{{ p.current_tp }} ({{ '%+.2f'|format(p.tp_pct) }}%){% else %}미설정{% endif %}</td>
         <td class="{{ 'pnl-pos' if p.unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(p.unrealized) }}</td>
       </tr>
       {% endfor %}
     </table>
+    {% if positions|selectattr('manual')|list %}
+    <div class="small" style="margin-top:6px;">(수동) = 봇이 추적하지 않는, 거래소에서 직접 연 포지션입니다. 조회만 하고 자동으로 관리/청산하지 않습니다.</div>
+    {% endif %}
     {% else %}
     <div class="small">현재 열린 포지션 없음 - 진입 신호 대기 중</div>
     {% endif %}
@@ -910,7 +913,47 @@ def index():
         sl_pct = (trade["current_sl"] / entry - 1) * 100.0 if entry > 0 else 0.0
         tp_pct = (trade["current_tp"] / entry - 1) * 100.0 if entry > 0 else 0.0
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized,
-                           "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct})
+                           "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct, "manual": False})
+
+    # Positions open on the exchange but tracked by NEITHER this bot's local
+    # state NOR aggressive_btc's -- i.e. opened manually on the Bybit app.
+    # The main bot deliberately never adopts an SL/TP-less position into its
+    # own management (see Strategy._reconcile_orphaned_positions), so one of
+    # these would otherwise never show up here at all. Shown read-only, with
+    # whatever the exchange itself reports (leverage/SL/TP may be missing if
+    # the user hasn't set them) -- this never writes anything back, so it
+    # can't interfere with the user's own manual management of the position.
+    tracked_symbols = set(snapshot.get("trades", {}).keys())
+    agg_state_path = aggressive_btc.state_path()
+    if os.path.exists(agg_state_path):
+        try:
+            tracked_symbols |= set(StateStore(agg_state_path).snapshot().get("trades", {}).keys())
+        except Exception:
+            pass
+    try:
+        exchange_positions = client.get_all_open_positions()
+    except BybitAPIError:
+        exchange_positions = []
+    for pos in exchange_positions:
+        symbol = pos["symbol"]
+        if symbol in tracked_symbols:
+            continue
+        side = "long" if pos["side"] == "Buy" else "short"
+        entry_price = pos["entry_price"]
+        try:
+            last_price = client.get_last_price(symbol)
+        except BybitAPIError:
+            last_price = entry_price
+        leverage = pos.get("leverage") or None
+        margin_pct = (pos["size"] * entry_price / leverage) / equity * 100.0 if (leverage and equity > 0) else None
+        sl_pct = (pos["stop_loss"] / entry_price - 1) * 100.0 if (pos["stop_loss"] > 0 and entry_price > 0) else None
+        tp_pct = (pos["take_profit"] / entry_price - 1) * 100.0 if (pos["take_profit"] > 0 and entry_price > 0) else None
+        positions.append({
+            "symbol": symbol, "side": side, "entry_price": entry_price, "qty": pos["size"],
+            "leverage": leverage, "current_sl": pos["stop_loss"] or None, "current_tp": pos["take_profit"] or None,
+            "last_price": round(last_price, 6), "unrealized": pos["unrealized_pnl"],
+            "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct, "manual": True,
+        })
 
     total_unrealized = sum(p["unrealized"] for p in positions)
 

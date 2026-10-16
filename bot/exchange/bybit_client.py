@@ -219,7 +219,11 @@ class BybitClient:
         """Lists every currently open position under this settle coin, regardless
         of symbol -- used to reconcile local state against reality (e.g. a
         position that's open on the exchange but the bot lost track of after a
-        state reset, so its SL/TP would otherwise never get checked).
+        state reset, so its SL/TP would otherwise never get checked), and by
+        the dashboard to show positions no local state file knows about at all
+        (e.g. opened manually on the Bybit app, never adopted by the bot --
+        see Strategy._reconcile_orphaned_positions for why an SL/TP-less
+        position is deliberately never adopted).
         """
         result = self._call(self.session.get_positions, category=self.category, settleCoin=settle_coin)
         out = []
@@ -235,6 +239,7 @@ class BybitClient:
                 "position_idx": int(p.get("positionIdx") or 0),
                 "stop_loss": float(p.get("stopLoss") or 0),
                 "take_profit": float(p.get("takeProfit") or 0),
+                "leverage": float(p.get("leverage") or 0),
             })
         return out
 
