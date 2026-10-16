@@ -111,6 +111,17 @@ TESTNET = False   # <-- flip this one line to go live. See module docstring.
 # -- shared across every configured symbol ---------------------------------------------------------
 TIMEFRAME = "60"                # Bybit kline interval string for 1-hour candles
 HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
+# |blended score| needed to enter a position, in either direction -- change
+# THIS ONE LINE to retune every configured symbol's entry sensitivity at
+# once (SOXL_CONFIG and _make_stock_config's SymbolConfigs below both read
+# it). Lowering it trades more often on weaker signals; raising it trades
+# less often but only on stronger ones. Was raised to this from 0.5 for
+# SOXLUSDT specifically because at 0.5, 1h SOXLUSDT rarely produced a strong
+# enough blended score to enter at all (observed live: a +0.34 blend sat
+# under the bar for hours) -- before changing it, backtest the new value via
+# the dashboard's /backtest page (its own entry_threshold field, independent
+# of this constant) to see how it would have performed historically.
+ENTRY_THRESHOLD = 0.4
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
@@ -125,10 +136,11 @@ TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
 @dataclass
 class SymbolConfig:
-    """Per-symbol knobs. Two instances of this (SOXL_CONFIG/SNXX_CONFIG
-    below) drive one AggressiveBTCStrategy each; everything else about the
-    strategy's mechanics (hourly cutoff, poll interval, TP/SL formula) is
-    shared via the module-level constants above.
+    """Per-symbol knobs. 39 instances of this (SOXL_CONFIG plus every
+    SEMI_AI_CONFIGS/STOCK_CONFIGS entry, built by _make_stock_config) each
+    drive one AggressiveBTCStrategy; everything else about the strategy's
+    mechanics (hourly cutoff, poll interval, TP/SL formula) is shared via the
+    module-level constants above.
     """
     symbol: str
     target_pct: float = 12.0               # take-profit, % ROI on margin
@@ -137,7 +149,7 @@ class SymbolConfig:
     min_leverage: float = 6.0
     max_leverage: float = 10.0
     leverage_hard_cap: float = 10.0        # never exceeded regardless of volatility
-    min_confidence_to_enter: float = 0.4   # |blended score| needed to call it "강세"
+    min_confidence_to_enter: float = ENTRY_THRESHOLD   # |blended score| needed to call it "강세"
     tech_weight: float = 0.10
     volume_weight: float = 0.15
     poly_weight: float = 0.10
@@ -150,12 +162,7 @@ class SymbolConfig:
 SOXL_CONFIG = SymbolConfig(
     symbol="SOXLUSDT",
     min_leverage=6.0, max_leverage=10.0, leverage_hard_cap=10.0,
-    # Lowered from 0.5: at 0.5, 1h SOXLUSDT rarely produced a strong enough
-    # blended score to enter at all (observed live: a +0.34 blend sat under
-    # the bar for hours) -- 0.4 trades more often while still requiring a
-    # real move, not just noise-level confirmation, from whichever
-    # components are active.
-    min_confidence_to_enter=0.4,
+    min_confidence_to_enter=ENTRY_THRESHOLD,
     polymarket_cfg={
         "keywords": ["bitcoin", "crypto", "fed ", "interest rate", "recession"],
         "refresh_minutes": 15,
@@ -301,7 +308,7 @@ def _make_stock_config(sym: str, news_cfg: dict) -> SymbolConfig:
     return SymbolConfig(
         symbol=sym,
         min_leverage=8.0, max_leverage=15.0, leverage_hard_cap=15.0,
-        min_confidence_to_enter=0.4,
+        min_confidence_to_enter=ENTRY_THRESHOLD,
         tech_weight=0.15, volume_weight=0.15, poly_weight=0.0, news_weight=0.70,
         polymarket_cfg=_STOCK_POLYMARKET_CFG,
         news_cfg=news_cfg,
