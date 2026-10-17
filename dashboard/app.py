@@ -751,6 +751,10 @@ _BACKTEST_TEMPLATE = """
     <button type="submit" class="run-btn" style="margin-left:10px;">다시 실행</button>
   </form>
 
+  <div class="small" style="margin:-6px 0 10px;">
+    <a href="/backtest?token={{ token }}&symbol={{ symbol }}&days={{ days }}&tech_weight={{ tech_weight }}&volume_weight={{ volume_weight }}&fee_pct={{ fee_pct }}&thresholds=0.2,0.3,0.4,0.5">진입 기준 0.2 vs 0.3 vs 0.4 vs 0.5 한번에 비교 →</a>
+  </div>
+
   <div class="card">
     <div class="small" style="margin-bottom:6px;">확보된 캔들: {{ candle_count }}개 (최대 {{ days }}일 요청)</div>
     <div class="grid">
@@ -794,6 +798,55 @@ _BACKTEST_TEMPLATE = """
 """
 
 
+_BACKTEST_SWEEP_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>진입 기준 비교</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  h1 { font-size:1.2rem; margin-bottom:4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #21262d; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  a { color:#7ee787; }
+</style>
+</head>
+<body>
+  <h1>⚡ {{ symbol }} 진입 기준(entry_threshold) 비교</h1>
+  <div class="small" style="margin-bottom:10px;">
+    같은 캔들({{ candle_count }}개, 최근 {{ days }}일)로 entry_threshold만 바꿔가며 돌린 결과예요.
+    기술+거래량 공식만 쓴 수치라 실거래(뉴스 비중 포함)와는 다를 수 있지만, "기준을 낮추면 거래가 얼마나
+    늘고 승률/수익이 어떻게 바뀌는지"는 방향성 있게 보여줘요.
+  </div>
+  <div class="card">
+    <table>
+      <tr><th>진입 기준</th><th>거래 수</th><th>승률</th><th>누적 ROI(수수료 차감)</th><th>거래당 평균 ROI</th><th>수수료 총 영향</th></tr>
+      {% for r in sweep %}
+      <tr>
+        <td>±{{ '%.2f'|format(r.entry_threshold) }}</td>
+        <td>{{ r.trade_count }}</td>
+        <td>{{ '%.0f'|format(r.win_rate * 100) + '%' if r.win_rate is not none else '-' }}</td>
+        <td class="{{ 'pnl-pos' if r.total_roi_pct >= 0 else 'pnl-neg' }}">{{ '%+.2f'|format(r.total_roi_pct) }}%</td>
+        <td class="{{ 'pnl-pos' if r.avg_roi_pct and r.avg_roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(r.avg_roi_pct) + '%' if r.avg_roi_pct is not none else '-' }}</td>
+        <td class="pnl-neg">-{{ '%.2f'|format(r.total_fee_pct) }}%</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <a href="/backtest?token={{ token }}&symbol={{ symbol }}&days={{ days }}&tech_weight={{ tech_weight }}&volume_weight={{ volume_weight }}&fee_pct={{ fee_pct }}&entry_threshold=0.2">← 단일 결과 보기로 돌아가기</a>
+  &nbsp;|&nbsp;
+  <a href="/?token={{ token }}">대시보드로</a>
+</body>
+</html>
+"""
+
+
 @app.route("/backtest")
 def backtest_route():
     """Triggers bot/backtest.py against real historical candles for one
@@ -825,6 +878,32 @@ def backtest_route():
     if len(candles) < 120:
         return (f"<p>히스토리 데이터가 부족해요 ({len(candles)}개 캔들만 확보됨, "
                 f"최소 120개 필요). 더 짧은 기간으로 시도해보세요.</p>"), 200
+
+    # ?thresholds=0.2,0.3,0.4 -- sweep several entry_threshold values against
+    # the SAME fetched candles (one Bybit fetch, not one per value) instead
+    # of making the user resubmit the form once per value by hand. Useful
+    # specifically for deciding "is a lower threshold actually worth the
+    # extra trades," since that's a tech+volume-only proxy answer (see
+    # module docstring) but still directionally informative.
+    thresholds_param = request.args.get("thresholds", "").strip()
+    if thresholds_param:
+        try:
+            threshold_values = sorted({float(v) for v in thresholds_param.split(",") if v.strip()})
+        except ValueError:
+            abort(400)
+        if not threshold_values:
+            abort(400)
+        sweep = []
+        for th in threshold_values:
+            r = simulate(candles, tech_weight=tech_weight, volume_weight=volume_weight,
+                         entry_threshold=th, round_trip_fee_pct_of_notional=fee_pct)
+            sweep.append({"entry_threshold": th, **r})
+        return render_template_string(
+            _BACKTEST_SWEEP_TEMPLATE, sweep=sweep, days=days,
+            tech_weight=tech_weight, volume_weight=volume_weight, fee_pct=fee_pct,
+            symbol=symbol, candle_count=len(candles), thresholds_param=thresholds_param,
+            token=request.args.get("token", ""),
+        )
 
     result = simulate(candles, tech_weight=tech_weight, volume_weight=volume_weight,
                        entry_threshold=entry_threshold, round_trip_fee_pct_of_notional=fee_pct)
