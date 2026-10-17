@@ -36,11 +36,15 @@ tradable. Check the dashboard after a deploy to see which actually came up;
 any missing one needs its ticker corrected against the Bybit app.
 
 Because all 39 symbols independently look for entry signals every tick, this
-module enforces a GLOBAL cap of exactly one open position at a time across
-all of them (see try_enter()'s check of state.open_trade_count()) -- a
-deliberate choice (over e.g. letting several symbols size down to minimum
-margin at once) so the existing 50%-of-equity-per-trade sizing never has to
-be shared or diluted across concurrent positions. With 39 symbols each doing
+module enforces a capacity cap of at most ONE LONG and ONE SHORT open at a
+time across all of them -- two concurrent positions total, never two on the
+same side (see try_enter()'s check of state.open_trade_sides()). A deliberate
+choice (over e.g. letting several symbols on the same side size down to
+minimum margin at once) so the existing 50%-of-equity-per-trade sizing never
+has to be shared or diluted across more than two concurrent positions -- in
+the worst case (a long and a short both open at once) that's up to ~100% of
+equity committed as margin, which get_available_balance_usdt()'s clamp in
+try_enter() still protects against literally overdrawing. With 39 symbols each doing
 its own kline fetch every tick (POLL_SEC=30s), one tick loop iteration now
 makes ~39 sequential Bybit API calls before sleeping -- still fine against
 Bybit's public rate limits and POLL_SEC's own headroom, but worth knowing if
@@ -64,9 +68,9 @@ Design, as specified (per symbol, via SymbolConfig):
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
   6. 50% of equity used as margin per trade (safe here specifically because
-     of the global one-position-at-a-time cap above -- it was NOT safe to
+     of the at-most-one-long-and-one-short cap above -- it was NOT safe to
      also give every stock symbol 50% without that cap, since several could
-     otherwise try to commit 50% each at once).
+     otherwise try to commit 50% each at once on the same side).
   7. Leverage auto-sized so the 12% target is roughly reachable within an
      hour given the symbol's recent realized volatility -- clipped to
      [min_leverage, max_leverage], hard-capped at leverage_hard_cap no
@@ -514,12 +518,15 @@ class AggressiveBTCStrategy:
     def try_enter(self):
         if self.state.get_trade(self.symbol) is not None:
             return
-        # Global cap: only one of the 39 configured symbols may be in a
-        # position at a time (see module docstring) -- this symbol has no
-        # open trade (checked above), so open_trade_count() > 0 here means
-        # some OTHER symbol currently does.
-        if self.state.open_trade_count() > 0:
-            self.state.set_skip_reason(self.symbol, "다른 종목이 이미 포지션 보유 중 (동시 1개 제한)")
+
+        # Capacity cap: at most one LONG and one SHORT may be open at a time
+        # across all 39 configured symbols (not one overall) -- see module
+        # docstring. If both sides are already taken, this symbol is blocked
+        # no matter what direction its own signal turns out to be, so skip
+        # the kline fetch entirely rather than compute a signal we can't act on.
+        existing_sides = self.state.open_trade_sides()
+        if len(existing_sides) >= 2:
+            self.state.set_skip_reason(self.symbol, "롱/숏 포지션 모두 이미 보유 중 (방향당 1개 제한)")
             return
 
         signal = self.get_signal()
@@ -542,6 +549,15 @@ class AggressiveBTCStrategy:
                              f"기준 ±{self.cfg.min_confidence_to_enter:.2f})")
             return
 
+        direction = signal["direction"]
+        if direction in existing_sides:
+            # The one side this symbol wants is already occupied by another
+            # symbol -- the OPPOSITE side would still be free (checked
+            # above), just not this one.
+            self.state.set_skip_reason(
+                self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 (방향당 1개 제한)")
+            return
+
         # Entry confirmation: don't act on the very first tick a direction
         # crosses the threshold -- a lower ENTRY_THRESHOLD trades on weaker
         # signals, which makes a single noisy tick (that reverses right back
@@ -549,7 +565,6 @@ class AggressiveBTCStrategy:
         # loses. Requiring the SAME direction on two consecutive checks
         # filters that out, at the cost of entering one check later than the
         # threshold itself was crossed.
-        direction = signal["direction"]
         if self._pending_entry is None or self._pending_entry.get("direction") != direction:
             self._pending_entry = {"direction": direction}
             self.state.set_skip_reason(

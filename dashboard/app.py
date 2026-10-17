@@ -524,7 +524,7 @@ TEMPLATE = """
 
   {% if aggressive_list %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 동시 1포지션 제한)</h2>
+    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
     <table>
       <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(7일)</th><th>거래수</th><th></th></tr>
       {% for agg in aggressive_list %}

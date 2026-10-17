@@ -668,15 +668,21 @@ def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     client.get_klines.assert_not_called()
 
 
-def test_try_enter_skips_when_a_different_symbol_already_has_a_position(tmp_path):
-    # Global one-position-at-a-time cap across all configured symbols (see
-    # module docstring) -- this strategy's own symbol (SOXLUSDT) is flat, but
-    # some OTHER symbol (e.g. AAPLUSDT) already has an open trade in the
-    # shared state file, so this symbol must not even check its own signal.
+def test_try_enter_skips_when_both_long_and_short_are_already_open_elsewhere(tmp_path):
+    # Capacity cap: at most one long AND one short across all configured
+    # symbols (see module docstring) -- this strategy's own symbol (SOXLUSDT)
+    # is flat, but two OTHER symbols already occupy both sides, so capacity
+    # is full no matter what direction this symbol's own signal is --  it
+    # must not even check its own signal.
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_trade("AAPLUSDT", {
         "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
         "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time(), "last_hour_checked": 0,
+    })
+    state.set_trade("TSLAUSDT", {
+        "symbol": "TSLAUSDT", "side": "short", "entry_price": 300.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 310.0, "current_tp": 290.0,
         "opened_at": time.time(), "last_hour_checked": 0,
     })
 
@@ -685,7 +691,47 @@ def test_try_enter_skips_when_a_different_symbol_already_has_a_position(tmp_path
     client.get_klines.assert_not_called()
     skip = state.get_skip_reason(SYMBOL)
     assert skip is not None
-    assert "1개 제한" in skip["reason"]
+    assert "방향당 1개 제한" in skip["reason"]
+
+
+def test_try_enter_skips_when_its_own_direction_matches_an_already_open_side(tmp_path):
+    # Only ONE side (long) is occupied -- this symbol must still compute its
+    # own signal (to know its direction), and is blocked only because its
+    # direction (long) happens to match the already-occupied side.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    state.set_trade("AAPLUSDT", {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time(), "last_hour_checked": 0,
+    })
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "long 방향 포지션이 이미 다른 종목에 있음" in skip["reason"]
+
+
+def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_path):
+    # AAPLUSDT holds the long side -- a short signal on this symbol is the
+    # free side, so it must proceed past the capacity check (into the normal
+    # 2-tick confirmation flow, not an immediate entry).
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
+    state.set_trade("AAPLUSDT", {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time(), "last_hour_checked": 0,
+    })
+
+    strategy.try_enter()
+
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "방향당 1개 제한" not in skip["reason"]  # not blocked by capacity
+    assert "1차 확인됨" in skip["reason"]  # reached the normal confirmation gate instead
 
 
 # -- _resolve_credentials ---------------------------------------------------------

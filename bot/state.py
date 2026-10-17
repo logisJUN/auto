@@ -72,6 +72,14 @@ class StateStore:
     def open_trade_count(self) -> int:
         return len(self._state["trades"])
 
+    def open_trade_sides(self) -> set[str]:
+        """Distinct `side` values ("long"/"short") among currently open
+        trades in this state file -- used by aggressive_btc's long+short
+        concurrency cap (at most one position per side at a time, across
+        every configured symbol sharing this state file, not one overall).
+        """
+        return {t.get("side") for t in self._state["trades"].values() if t.get("side")}
+
     def record_closed_trade(self, summary: dict):
         self._state["history"].append(summary)
         self._state["history"] = self._state["history"][-200:]
