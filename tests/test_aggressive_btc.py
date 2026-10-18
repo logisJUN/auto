@@ -22,7 +22,7 @@ from bot.aggressive_btc import (
     roi_pct,
     should_hourly_cutoff,
 )
-from bot.exchange.bybit_client import BybitClient
+from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.logger import read_recent_decisions
 from bot.notify import Notifier
 from bot.state import StateStore
@@ -583,6 +583,86 @@ def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
     reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
     assert "SL/TP 설정 실패" in reason["reason"]
+
+
+# -- fill-price drift reconciliation ---------------------------------------------------------
+# A MARKET order's actual average fill price can differ from the
+# get_last_price() snapshot taken just before placing it (observed live on
+# DJTUSDT: a ~0.37% stale snapshot during a fast-moving candle turned an
+# intended +12%/-5% ROI target into an actual +6.5%/-10.6%) -- try_enter()
+# now compares the real fill price (from get_position() after the order
+# fills) against its own pre-trade estimate and re-prices SL/TP if they
+# drifted meaningfully.
+
+def test_try_enter_reprices_sl_tp_when_fill_price_drifts_from_estimate(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0  # pre-trade estimate
+    client.open_position.return_value = {}
+    real_fill_price = 139.0  # >0.1% away from the 140.0 estimate -- should trigger a reprice
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Sell", "size": 1.0, "entry_price": real_fill_price,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 147.0, "take_profit": 123.2,  # as originally attached
+    }
+    strategy._pending_entry = {"direction": "short"}
+
+    strategy.try_enter()
+
+    client.update_trading_stop.assert_called_once()
+    call_kwargs = client.update_trading_stop.call_args
+    assert call_kwargs[0][0] == SYMBOL
+
+    trade = state.get_trade(SYMBOL)
+    assert trade is not None
+    assert trade["entry_price"] == real_fill_price  # local bookkeeping uses the REAL fill price
+    expected = compute_tp_sl_prices(real_fill_price, "short", trade["leverage"])
+    assert trade["current_sl"] == round(expected["sl"], 1)
+    assert trade["current_tp"] == round(expected["tp"], 1)
+
+
+def test_try_enter_does_not_reprice_when_fill_price_is_close_to_estimate(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.05,  # 0.036% drift -- below the 0.1% bar
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+    strategy._pending_entry = {"direction": "long"}
+
+    strategy.try_enter()
+
+    client.update_trading_stop.assert_not_called()
+    trade = state.get_trade(SYMBOL)
+    assert trade["entry_price"] == 140.05  # still uses the real fill price for bookkeeping either way
+
+
+def test_try_enter_keeps_original_sl_tp_if_reprice_call_fails(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 139.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+    client.update_trading_stop.side_effect = BybitAPIError("position already closed")
+    strategy._pending_entry = {"direction": "long"}
+
+    strategy.try_enter()  # must not raise, and must still record a trade
+
+    trade = state.get_trade(SYMBOL)
+    assert trade is not None
+    # Falls back to the originally-computed (pre-drift-correction) SL/TP since the reprice failed.
+    assert trade["current_sl"] == round(compute_tp_sl_prices(140.0, "long", trade["leverage"])["sl"], 1)
+    assert trade["current_tp"] == round(compute_tp_sl_prices(140.0, "long", trade["leverage"])["tp"], 1)
 
 
 def test_manage_open_position_closes_on_hourly_cutoff(tmp_path):

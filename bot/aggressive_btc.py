@@ -654,6 +654,37 @@ class AggressiveBTCStrategy:
             self.state.set_skip_reason(self.symbol, "SL/TP 설정 실패로 긴급 청산됨")
             return
 
+        # A MARKET order can fill at a different price than the
+        # get_last_price() snapshot taken just above (used to compute
+        # sl_price/tp_price) -- especially during a fast-moving candle.
+        # Observed live on DJTUSDT: a ~0.37% stale snapshot turned an
+        # intended +12%/-5% ROI target into an actual +6.5%/-10.6% (both SL
+        # and TP silently drifted, SL far more loosely than intended).
+        # exchange_position["entry_price"] is the REAL average fill price --
+        # if it drifted meaningfully from our estimate, recompute SL/TP
+        # against it and re-attach, rather than silently keeping targets
+        # that no longer mean what SymbolConfig says they should.
+        real_entry_price = exchange_position["entry_price"]
+        price_drift = abs(real_entry_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        if price_drift > 0.001:  # >0.1% -- below this, not worth another API round-trip
+            corrected = compute_tp_sl_prices(real_entry_price, side, leverage,
+                                              target_pct=self.cfg.target_pct, stop_loss_pct=self.cfg.stop_loss_pct)
+            corrected_sl = self.client.round_price(self.symbol, corrected["sl"])
+            corrected_tp = self.client.round_price(self.symbol, corrected["tp"])
+            try:
+                self.client.update_trading_stop(self.symbol, stop_loss=corrected_sl, take_profit=corrected_tp)
+                logger.info("aggressive_btc: %s re-priced SL/TP after %.2f%% fill drift (est=%.4f real=%.4f): "
+                            "SL %.4f->%.4f TP %.4f->%.4f",
+                            self.symbol, price_drift * 100, entry_price, real_entry_price,
+                            sl_price, corrected_sl, tp_price, corrected_tp)
+                sl_price, tp_price = corrected_sl, corrected_tp
+            except BybitAPIError as exc:
+                # Not fatal -- the originally-attached SL/TP are still live
+                # protection, just off-target by price_drift's amount.
+                logger.warning("aggressive_btc: %s failed to re-price SL/TP after fill drift, "
+                                "keeping originally-attached SL/TP: %s", self.symbol, exc)
+        entry_price = real_entry_price  # local bookkeeping (ROI%, history, dashboard) uses the real fill price
+
         trade = {
             "symbol": self.symbol, "side": side, "entry_price": entry_price, "qty": qty,
             "margin": margin, "leverage": leverage, "current_sl": sl_price, "current_tp": tp_price,
