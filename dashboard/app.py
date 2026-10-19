@@ -285,6 +285,15 @@ def _build_closed_trade_report(client: BybitClient, start_ms: int, end_ms: int, 
     except Exception:
         records = []
 
+    # get_closed_pnl_since returns EVERY closed position on the account, not
+    # just aggressive_btc's -- without this filter, the main bot's own
+    # trades (if MAIN_BOT_ENABLED) and anything closed manually on the
+    # Bybit app show up mixed into what's supposed to be an aggressive_btc-
+    # only report (observed live: BTCUSDT/TSLLUSDT/HUMAUSDT rows, none of
+    # which aggressive_btc trades, dominating the "누적 손익" total).
+    configured_symbols = {sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
+    records = [r for r in records if r.get("symbol") in configured_symbols]
+
     local_exits: dict[str, list[tuple[float, str]]] = {}
     for d in read_recent_decisions(log_dir, limit=5000):
         if d.get("event") == "exit" and d.get("symbol") and d.get("reason"):
