@@ -84,8 +84,8 @@ AGGRESSIVE_BTC_PNL_START = datetime(2026, 10, 1, tzinfo=KST)
 # already returns every symbol's records in one call, so looping it 39 times
 # (once per configured symbol) was 39x redundant identical requests every
 # cache-refresh cycle -- a real contributor to the rate-limit risk this
-# project has hit before. {"ts": ..., "by_symbol": {symbol: total_pnl}}.
-_agg_exchange_pnl_cache: dict = {"ts": 0.0, "by_symbol": {}}
+# project has hit before.
+_agg_exchange_pnl_cache: dict = {"ts": 0.0, "pnl_by_symbol": {}, "count_by_symbol": {}}
 
 # USD/KRW moves slowly enough that an hourly refresh is plenty -- avoids a
 # forex API call on every 20s dashboard refresh. Free, no-key endpoint; if it
@@ -145,7 +145,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
     return out
 
 
-def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> list[dict]:
+def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
     (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 38 stock tokens) --
     empty list if that module has never run (no state file yet), so this
@@ -158,23 +158,23 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
     for -- true once aggressive_btc is flipped to live (it then shares the
     main bot's live account).
 
-    `perf_by_symbol` is compute_performance_summary(log_dir)["by_symbol"] --
-    cumulative_pnl/trade_count are sourced from THIS (decisions.jsonl-based),
-    not from this state file's own "history" list. Observed live: a Render
-    redeploy resets state.json's "history" back to empty (no persistent disk
-    on the free plan -- see module docstring) even when real trades already
-    closed, showing "누적손익(로컬) 0.0000" next to a nonzero
-    "거래소손익(10/01~)" for the very same symbol. decisions.jsonl isn't
-    immune to the same reset, but in practice it's the log that's already
-    relied on for "성과 리뷰" above, so reusing it here keeps the two
-    sections showing the same number for the same symbol instead of
-    silently disagreeing. state.json's own "history" is still consulted for
-    the per-trade detail table.
+    cumulative_pnl/trade_count are sourced ENTIRELY from Bybit's own
+    closed-pnl ledger (one shared fetch since AGGRESSIVE_BTC_PNL_START, see
+    _agg_exchange_pnl_cache below) -- NOT from any local file. Both
+    state.json's "history" and decisions.jsonl reset on every Render
+    redeploy (no persistent disk on the free plan), which previously showed
+    a confusing "누적손익(로컬) 0.0000" for a symbol that had very real,
+    nonzero exchange PnL, every single time a redeploy happened to land
+    between two checks -- which, during active development, was often.
+    Only the exchange ledger survives that. state.json's own "history" is
+    still consulted for the per-trade detail table (leverage/reason like
+    "sl_tp_hit" vs "hourly_cutoff" are this module's own judgment calls, not
+    something the exchange record carries), just not for the PnL total.
 
-    Only symbols with an open position, a recorded trade, or a skip reason
-    are included -- a symbol aggressive_btc's own startup validation
-    dropped (an invalid/delisted ticker, see that module's docstring)
-    simply won't appear here either.
+    Only symbols with an open position, a recorded exchange trade since
+    AGGRESSIVE_BTC_PNL_START, or a skip reason are included -- a symbol
+    aggressive_btc's own startup validation dropped (an invalid/delisted
+    ticker, see that module's docstring) simply won't appear here either.
     """
     path = aggressive_btc.state_path()
     if not os.path.exists(path):
@@ -197,16 +197,20 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
         try:
             since_ms = int(AGGRESSIVE_BTC_PNL_START.timestamp() * 1000)
             records = client.get_closed_pnl_since(since_ms)
-            by_symbol: dict[str, float] = {}
+            pnl_by_symbol: dict[str, float] = {}
+            count_by_symbol: dict[str, int] = {}
             for r in records:
                 sym = r.get("symbol")
                 if sym:
-                    by_symbol[sym] = by_symbol.get(sym, 0.0) + float(r.get("closedPnl") or 0.0)
-            _agg_exchange_pnl_cache["by_symbol"] = by_symbol
+                    pnl_by_symbol[sym] = pnl_by_symbol.get(sym, 0.0) + float(r.get("closedPnl") or 0.0)
+                    count_by_symbol[sym] = count_by_symbol.get(sym, 0) + 1
+            _agg_exchange_pnl_cache["pnl_by_symbol"] = pnl_by_symbol
+            _agg_exchange_pnl_cache["count_by_symbol"] = count_by_symbol
             _agg_exchange_pnl_cache["ts"] = now
         except Exception:
             pass  # keep serving the last good snapshot, if any
-    exchange_pnl_by_symbol = _agg_exchange_pnl_cache["by_symbol"]
+    exchange_pnl_by_symbol = _agg_exchange_pnl_cache["pnl_by_symbol"]
+    exchange_count_by_symbol = _agg_exchange_pnl_cache["count_by_symbol"]
 
     views = []
     for symbol in symbols:
@@ -238,9 +242,8 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
                 "time_str": _kst_str(t.get("closed_at", time.time())),
             })
 
-        symbol_perf = perf_by_symbol.get(symbol, {"count": 0, "total_pnl": 0.0})
-        cumulative_pnl = symbol_perf["total_pnl"]
-        trade_count = symbol_perf["count"]
+        cumulative_pnl = exchange_pnl_by_symbol.get(symbol, 0.0)
+        trade_count = exchange_count_by_symbol.get(symbol, 0)
         skip = all_skips.get(symbol)
 
         if position is None and trade_count == 0 and skip is None:
@@ -251,21 +254,10 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
             # fresh start; it appears as soon as it has ANY data.
             continue
 
-        # Render's free plan has no persistent disk -- a redeploy wipes
-        # state AND decisions.jsonl alike, so cumulative_pnl/trade_count
-        # above can still read 0 for a symbol that traded before the most
-        # recent restart. Bybit's own closed-pnl ledger (fetched once for
-        # the whole account above, not per symbol) doesn't have that
-        # problem -- a real loss/gain total is visible even when every local
-        # log was just wiped. This doesn't attempt to reconstruct the
-        # itemized table above -- leverage/reason ("sl_tp_hit" vs
-        # "hourly_cutoff") are this module's own judgment calls, not
-        # something the exchange record carries.
         views.append({"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
                       "trade_count": trade_count,
                       "skip_reason": skip.get("reason") if skip else None,
-                      "symbol": symbol,
-                      "exchange_pnl_total": exchange_pnl_by_symbol.get(symbol)})
+                      "symbol": symbol})
     return views
 
 
@@ -569,11 +561,10 @@ TEMPLATE = """
   <div class="card">
     <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
     <div class="grid" style="margin-bottom:10px;">
-      <div><div class="stat-label">누적손익(로컬) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
-      <div><div class="stat-label">거래소손익(10/01~) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.exchange_pnl_total >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.exchange_pnl_total) }}</div></div>
+      <div><div class="stat-label">누적손익(10/01~) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
     </div>
     <table>
-      <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(10/01~)</th><th>거래수</th><th></th></tr>
+      <tr><th>심볼</th><th>상태</th><th>누적손익(10/01~)</th><th>거래수</th><th></th></tr>
       {% for agg in aggressive_list %}
       <tr>
         <td>{{ agg.symbol }}</td>
@@ -587,14 +578,12 @@ TEMPLATE = """
           {% endif %}
         </td>
         <td class="{{ 'pnl-pos' if agg.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.cumulative_pnl) }}</td>
-        <td class="{{ 'pnl-pos' if agg.exchange_pnl_total is not none and agg.exchange_pnl_total >= 0 else 'pnl-neg' }}">
-          {{ '%.4f'|format(agg.exchange_pnl_total) if agg.exchange_pnl_total is not none else '-' }}</td>
         <td>{{ agg.trade_count }}</td>
         <td class="small"><a href="/backtest?token={{ token }}&symbol={{ agg.symbol }}">백테스트</a></td>
       </tr>
       {% endfor %}
     </table>
-    <div class="small" style="margin-top:6px;">메인 봇과 분리된 별도 상태 파일 사용. 각 심볼의 상세 신호/점수는 아래 "최근 판단 로그"에서 확인하세요. 배포/재시작 시 로컬 기록은 리셋되지만 거래소손익(10/01~)은 Bybit 체결 내역 기준이라 유지됩니다.</div>
+    <div class="small" style="margin-top:6px;">메인 봇과 분리된 별도 상태 파일 사용. 각 심볼의 상세 신호/점수는 아래 "최근 판단 로그"에서 확인하세요. 누적손익은 Bybit 체결 내역(2026-10-01~) 기준이라 배포/재시작으로 리셋되지 않습니다.</div>
   </div>
   {% endif %}
 
@@ -1124,11 +1113,8 @@ def index():
 
     stress = _get_stress_test(equity, snapshot.get("trades", {})) if (equity > 0 and main_bot_enabled) else None
     perf = compute_performance_summary(log_dir)
-    aggressive_list = _build_aggressive_btc_views(client, perf["by_symbol"])
-    aggressive_totals = {
-        "cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list),
-        "exchange_pnl_total": sum(a["exchange_pnl_total"] for a in aggressive_list if a["exchange_pnl_total"] is not None),
-    }
+    aggressive_list = _build_aggressive_btc_views(client)
+    aggressive_totals = {"cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list)}
 
     return render_template_string(
         TEMPLATE,
