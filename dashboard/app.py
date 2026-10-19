@@ -355,6 +355,7 @@ TEMPLATE = """
   .small { color:#8b949e; font-size:0.75rem; }
   .hl-short { color:#ff7b72; font-weight:700; }
   .hl-long { color:#58a6ff; font-weight:700; }
+  .hl-strong { background-color:rgba(227,179,65,0.35); border-radius:4px; }
   .copy-btn { float:right; background:#21262d; color:#e6edf3; border:1px solid #30363d;
               border-radius:6px; padding:6px 12px; font-size:0.85rem; }
   .copy-btn:active { background:#30363d; }
@@ -595,7 +596,7 @@ TEMPLATE = """
       <tr>
         <td class="small">{{ d.time_str }}</td>
         <td>{{ d.event }}</td>
-        <td class="small {{ 'hl-short' if d.highlight == 'short' else ('hl-long' if d.highlight == 'long' else '') }}">{{ d.summary }}</td>
+        <td class="small {{ 'hl-short' if d.highlight == 'short' else ('hl-long' if d.highlight == 'long' else '') }} {{ 'hl-strong' if d.strong else '' }}">{{ d.summary }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -692,6 +693,13 @@ def _decision_summary(d: dict) -> str:
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 
+# Separate from ENTRY_THRESHOLD (the bot's own, currently-tunable entry bar,
+# 0.2 as of this writing) -- this is just a fixed "strong signal" visual
+# marker for the dashboard, so it keeps meaning the same thing regardless of
+# where ENTRY_THRESHOLD happens to be set at the moment.
+_STRONG_SCORE_HIGHLIGHT_THRESHOLD = 0.4
+
+
 def _mark_extreme_scores(decisions: list[dict]) -> None:
     """Flags (in place) the signal_check row with the single LOWEST score
     (most negative -- red/bold) and the one with the single HIGHEST score
@@ -699,6 +707,14 @@ def _mark_extreme_scores(decisions: list[dict]) -> None:
     the log, these two are the current extremes, worth drawing the eye to.
     Forced distinct (the lowest pick is excluded before picking the
     highest) so a one-row list can't get claimed by both.
+
+    Separately (and not mutually exclusive with the above -- a row can be
+    both the overall lowest AND beyond the strong-score bar), flags every
+    signal_check row whose |score| exceeds _STRONG_SCORE_HIGHLIGHT_THRESHOLD
+    with "strong": True, for a yellow highlighter-style background in the
+    template -- these are the rows closest to (or already past) actually
+    triggering a trade, worth a glance even when they're not the single
+    most extreme row on the page.
     """
     candidates = [i for i, d in enumerate(decisions) if d.get("event_raw") == "signal_check" and d.get("score") is not None]
     if not candidates:
@@ -709,6 +725,10 @@ def _mark_extreme_scores(decisions: list[dict]) -> None:
     if remaining:
         highest_idx = max(remaining, key=lambda i: decisions[i]["score"])
         decisions[highest_idx]["highlight"] = "long"
+
+    for i in candidates:
+        if abs(decisions[i]["score"]) > _STRONG_SCORE_HIGHLIGHT_THRESHOLD:
+            decisions[i]["strong"] = True
 
 
 def _decision_event_label(d: dict) -> str:
