@@ -101,6 +101,22 @@ Design, as specified (per symbol, via SymbolConfig):
      multiplier distorting the TP/SL math, but still well under the original
      24x/25x crypto design since this is a brand-new asset class for this
      bot and real stocks can gap sharply on earnings/news.
+  8. Disaster stop: independent of (and checked before) every other
+     management rule, manage_open_position() force-closes the moment ROI
+     falls past DISASTER_STOP_MULTIPLIER times the symbol's own stop_loss_pct
+     (e.g. -10% for the default -5% SL) -- a second-layer safety net for when
+     the exchange's own SL order fills far looser than intended (observed
+     live on DJTUSDT: actual -17.17% against a configured -5% SL, from fill
+     slippage during a fast move). This doesn't prevent that kind of gap --
+     it only limits how long a position is left open past it once detected.
+  9. Per-symbol consecutive-loss cooldown: every close (any reason) is scored
+     win/loss by realized pnl via state.record_symbol_result(); after
+     SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES straight losses, that symbol alone
+     is blocked from new entries for SYMBOL_PAUSE_DURATION_MIN (ported from
+     the main bot's Strategy, which uses the same state.py mechanism --
+     motivated by ANETUSDT losing 3 straight times live while every other
+     symbol traded fine on the same signal logic over the same period, the
+     same pattern that led the main bot to add this in the first place).
 
 ================================================================================
 TESTNET below is the ONLY thing that needs to change to go live. Defaults to
@@ -148,6 +164,23 @@ HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
 # position that's simply been losing the whole time (HOURLY_CUTOFF_PCT/SL
 # already handle that case) -- only to one that WAS ahead and gave it back.
 BREAKEVEN_STOP_AFTER_HOURS = 2.0
+# Second-layer safety net, independent of the exchange's own SL order: a
+# MARKET order's trigger-to-fill gap during a fast move can let realized
+# loss blow well past stop_loss_pct (observed live on DJTUSDT: -17.17%
+# actual vs. a configured -5% SL -- more than 3x over). manage_open_position()
+# checks this every tick and force-closes immediately once ROI falls past
+# stop_loss_pct * this multiplier, rather than trusting the exchange SL
+# order to have already caught it. Expressed as a multiplier of each
+# SymbolConfig's own stop_loss_pct (not a flat number) so it stays
+# proportional if stop_loss_pct ever differs across symbols.
+DISASTER_STOP_MULTIPLIER = 2.0
+# Per-symbol consecutive-loss cooldown -- same mechanism the main bot's
+# Strategy uses (state.record_symbol_result/set_entry_backoff), ported here
+# after ANETUSDT lost 3 straight times live while every other symbol traded
+# fine on the same signal logic over the same period (the same SNXXUSDT-like
+# pattern that motivated the main bot's version).
+SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES = 2
+SYMBOL_PAUSE_DURATION_MIN = 360  # 6 hours
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
@@ -553,6 +586,11 @@ class AggressiveBTCStrategy:
         if self.state.get_trade(self.symbol) is not None:
             return
 
+        backoff = self.state.get_entry_backoff(self.symbol)
+        if backoff and time.time() < backoff.get("until_ts", 0):
+            self.state.set_skip_reason(self.symbol, f"연속손실 백오프 중 ({backoff.get('reason', '')})")
+            return
+
         # No early "capacity full, skip the kline fetch" shortcut anymore --
         # a confirmed signal here may trigger rotation (see below) even when
         # both sides are already taken, so the signal has to be computed
@@ -780,6 +818,20 @@ class AggressiveBTCStrategy:
         hours_open = (time.time() - trade["opened_at"]) / 3600.0
         current_roi = roi_pct(exchange_position["unrealized_pnl"], trade["margin"])
 
+        # Disaster stop -- see DISASTER_STOP_MULTIPLIER. Checked first and
+        # independent of every other rule below: a loss this far past the
+        # configured SL means the exchange's own SL order has already failed
+        # to protect at the intended level (slippage/gap during a fast
+        # move), so there's no reason to let the breakeven/hourly checks
+        # below get a turn first.
+        disaster_roi = -abs(self.cfg.stop_loss_pct) * DISASTER_STOP_MULTIPLIER
+        if current_roi <= disaster_roi:
+            logger.critical("aggressive_btc: %s disaster stop -- ROI=%.2f%% past %.1fx the configured "
+                             "-%.1f%% SL, force-closing", self.symbol, current_roi,
+                             DISASTER_STOP_MULTIPLIER, self.cfg.stop_loss_pct)
+            self._close_and_settle(self.symbol, trade, "disaster_stop")
+            return
+
         if current_roi > 0:
             trade["was_profitable"] = True
 
@@ -848,6 +900,19 @@ class AggressiveBTCStrategy:
             pnl_is_estimate = True
 
         self.state.set_trade(symbol, None)
+
+        # Per-symbol consecutive-loss cooldown -- see SYMBOL_PAUSE_AFTER_
+        # CONSECUTIVE_LOSSES. Scored by realized pnl regardless of close
+        # reason (same as the main bot's equivalent), so a string of
+        # rotated_out/hourly_cutoff/breakeven_stop losses on one symbol
+        # triggers this exactly like a string of sl_tp_hit losses would.
+        streak = self.state.record_symbol_result(symbol, won=pnl >= 0)
+        if SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES > 0 and streak >= SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES:
+            self.state.set_entry_backoff(symbol, time.time() + SYMBOL_PAUSE_DURATION_MIN * 60,
+                                          reason=f"{streak}연속 손실")
+            self.notifier.send(f"[알림] aggressive_btc: {symbol} {streak}회 연속 손실로 "
+                                f"{SYMBOL_PAUSE_DURATION_MIN}분간 거래를 일시 정지합니다.")
+
         self.state.record_closed_trade({
             "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "qty": trade["qty"], "pnl": pnl, "reason": reason, "pnl_is_estimate": pnl_is_estimate,

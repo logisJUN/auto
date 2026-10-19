@@ -273,7 +273,7 @@ def _build_closed_trade_report(client: BybitClient, start_ms: int, end_ms: int, 
     sourced, like cumulative_pnl in _build_aggressive_btc_views.
 
     "청산 사유" (exit reason, e.g. "hourly_cutoff"/"breakeven_stop"/
-    "rotated_out"/"sl_tp_hit") is the one thing Bybit's own record doesn't
+    "rotated_out"/"sl_tp_hit"/"disaster_stop") is the one thing Bybit's own record doesn't
     carry -- that's this bot's own judgment call, not the exchange's. Best-
     effort matched against decisions.jsonl's "exit" events by symbol + the
     closest timestamp within a loose tolerance; shows "-" for any trade

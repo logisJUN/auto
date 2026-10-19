@@ -802,6 +802,81 @@ def test_manage_open_position_marks_was_profitable_once_roi_turns_positive(tmp_p
     assert trade["was_profitable"] is True
 
 
+# -- disaster stop (DISASTER_STOP_MULTIPLIER) ---------------------------------------------------------
+
+def test_manage_open_position_closes_at_disaster_stop_when_roi_far_past_sl(tmp_path):
+    # SOXL_CONFIG's stop_loss_pct is 5.0 -> disaster line is -10%. A loss
+    # beyond that (e.g. SL-order fill slippage during a fast move, as
+    # observed live on DJTUSDT at -17.17% against a configured -5% SL) must
+    # force-close immediately, regardless of hours_open or was_profitable.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 60, "last_hour_checked": 0,  # well under 1h
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -6.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,  # -12% ROI on 50 margin
+    }
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 88.0
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_called_once()
+    assert state.get_trade(SYMBOL) is None
+    history = state.snapshot()["history"]
+    assert history[-1]["reason"] == "disaster_stop"
+
+
+def test_manage_open_position_does_not_disaster_stop_at_a_normal_loss(tmp_path):
+    # -5% ROI is exactly the configured SL, well short of the -10% disaster
+    # line -- the exchange's own SL order is expected to handle this case,
+    # not this second-layer check.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 60, "last_hour_checked": 0,
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -2.5, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,  # -5% ROI
+    }
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is not None
+
+
+def test_manage_open_position_disaster_stop_takes_priority_over_breakeven(tmp_path):
+    # A position that was profitable, now deep underwater past 2h, qualifies
+    # for BOTH breakeven_stop and disaster_stop -- disaster_stop must win
+    # since it's checked first and is the more urgent condition.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 2.5 * 3600, "last_hour_checked": 2,
+        "was_profitable": True,
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -6.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,  # -12% ROI
+    }
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 88.0
+
+    strategy.manage_open_position()
+
+    history = state.snapshot()["history"]
+    assert history[-1]["reason"] == "disaster_stop"
+
+
 def test_manage_open_position_settles_when_sl_tp_already_closed_it(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_trade(SYMBOL, {
@@ -969,6 +1044,87 @@ def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_
     assert skip is not None
     assert "방향당 1개 제한" not in skip["reason"]  # not blocked by capacity
     assert "1차 확인됨" in skip["reason"]  # reached the normal confirmation gate instead
+
+
+# -- per-symbol consecutive-loss cooldown ---------------------------------------------------------
+
+def _close_a_losing_trade(strategy, state, client, symbol=SYMBOL):
+    state.set_trade(symbol, {
+        "symbol": symbol, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 60, "last_hour_checked": 0,
+    })
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 95.0  # below entry -- a loss on a long
+    strategy._close_and_settle(symbol, state.get_trade(symbol), "hourly_cutoff")
+
+
+def test_close_and_settle_sets_entry_backoff_after_consecutive_losses(tmp_path):
+    # SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES is 2 -- the 2nd straight loss on
+    # the same symbol must trigger the backoff (ANETUSDT's live 3-straight-
+    # loss pattern that motivated this).
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    _close_a_losing_trade(strategy, state, client)
+    assert state.get_entry_backoff(SYMBOL) is None  # 1st loss alone doesn't trip it
+
+    _close_a_losing_trade(strategy, state, client)
+
+    backoff = state.get_entry_backoff(SYMBOL)
+    assert backoff is not None
+    assert backoff["until_ts"] > time.time()
+    assert "2연속 손실" in backoff["reason"]
+
+
+def test_close_and_settle_resets_consecutive_loss_streak_on_a_win(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    _close_a_losing_trade(strategy, state, client)
+    assert state.get_consecutive_losses(SYMBOL) == 1
+
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 60, "last_hour_checked": 0,
+    })
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 110.0  # above entry -- a win on a long
+    strategy._close_and_settle(SYMBOL, state.get_trade(SYMBOL), "hourly_cutoff")
+
+    assert state.get_consecutive_losses(SYMBOL) == 0
+    assert state.get_entry_backoff(SYMBOL) is None
+
+
+def test_try_enter_skips_while_in_consecutive_loss_backoff(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_entry_backoff(SYMBOL, time.time() + 3600, reason="2연속 손실")
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+
+    strategy.try_enter()
+
+    client.get_klines.assert_not_called()  # never even computed the signal
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "백오프" in skip["reason"]
+
+
+def test_try_enter_proceeds_once_the_backoff_expires(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_entry_backoff(SYMBOL, time.time() - 1, reason="2연속 손실")  # already expired
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "long"}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
 
 
 # -- _resolve_credentials ---------------------------------------------------------
