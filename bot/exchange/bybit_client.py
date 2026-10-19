@@ -267,22 +267,43 @@ class BybitClient:
         except (KeyError, ValueError, TypeError):
             return None
 
-    def get_closed_pnl_since(self, start_time_ms: int) -> list[dict]:
-        """Every closed-pnl record (across all symbols) since start_time_ms,
-        paginating through Bybit's cursor if there's more than one page. Used
-        to reconstruct today's realized PnL from the exchange's own records
-        after a local state reset, instead of just assuming it was 0.
+    def get_closed_pnl_since(self, start_time_ms: int, window_ms: int = 7 * 24 * 3600 * 1000) -> list[dict]:
+        """Every closed-pnl record (across all symbols) since start_time_ms.
+        Used to reconstruct realized PnL from the exchange's own records
+        after a local state reset, instead of just assuming it was 0 (same-
+        day, for the main bot's daily loss tracking) or incomplete (multi-day,
+        for the dashboard's aggressive_btc cumulative PnL).
+
+        Bybit's get-closed-pnl enforces startTime/endTime no more than
+        `window_ms` (7 days) apart per request -- a longer range silently
+        returns nothing past that limit if sent as one call. This walks
+        backward from now in `window_ms`-sized windows, cursor-paginating
+        within each one, until start_time_ms is covered. For a caller asking
+        for less than one window (e.g. "since midnight today"), this is a
+        single window, identical to the old single-window-only behavior.
+        """
+        out: list[dict] = []
+        end_time_ms = int(time.time() * 1000)
+        while end_time_ms > start_time_ms:
+            window_start_ms = max(start_time_ms, end_time_ms - window_ms)
+            out.extend(self._get_closed_pnl_window(window_start_ms, end_time_ms))
+            end_time_ms = window_start_ms
+        return out
+
+    def _get_closed_pnl_window(self, start_time_ms: int, end_time_ms: int) -> list[dict]:
+        """One ≤window_ms-wide closed-pnl query, cursor-paginated. See
+        get_closed_pnl_since, which calls this once per time window.
         """
         out: list[dict] = []
         cursor = None
         for _ in range(20):  # hard cap so a pagination bug can't loop forever
-            kwargs = dict(category=self.category, startTime=start_time_ms, limit=100)
+            kwargs = dict(category=self.category, startTime=start_time_ms, endTime=end_time_ms, limit=100)
             if cursor:
                 kwargs["cursor"] = cursor
             try:
                 result = self._call(self.session.get_closed_pnl, **kwargs)
             except BybitAPIError:
-                logger.exception("failed to fetch closed-pnl history since %s", start_time_ms)
+                logger.exception("failed to fetch closed-pnl history for window %s-%s", start_time_ms, end_time_ms)
                 break
             out.extend(result.get("list", []))
             cursor = result.get("nextPageCursor")

@@ -70,9 +70,17 @@ _stress_cache = {"ts": 0.0, "data": None}
 # (shared rate-limit budget with the bot's own trading calls) on every 20s
 # dashboard refresh for a number that only changes when a trade actually closes.
 _AGG_EXCHANGE_PNL_CACHE_TTL_SEC = 120
-# One entry per aggressive_btc symbol (symbol -> {"ts":..., "value":...}) --
-# a plain dict is fine here since the dashboard runs as a single process/thread.
-_agg_exchange_pnl_cache: dict[str, dict] = {}
+# How far back to look for aggressive_btc's exchange-verified cumulative PnL.
+# get_closed_pnl_since() chunks this into 7-day windows itself, so this being
+# longer than 7 days is cheap (still ONE fetch per refresh, covering all 39
+# symbols -- see _agg_exchange_pnl_cache below).
+_AGG_EXCHANGE_PNL_LOOKBACK_SEC = 30 * 24 * 3600
+# ONE shared fetch for the whole account, not one per symbol: get_closed_pnl_since
+# already returns every symbol's records in one call, so looping it 39 times
+# (once per configured symbol) was 39x redundant identical requests every
+# cache-refresh cycle -- a real contributor to the rate-limit risk this
+# project has hit before. {"ts": ..., "by_symbol": {symbol: total_pnl}}.
+_agg_exchange_pnl_cache: dict = {"ts": 0.0, "by_symbol": {}}
 
 # USD/KRW moves slowly enough that an hourly refresh is plenty -- avoids a
 # forex API call on every 20s dashboard refresh. Free, no-key endpoint; if it
@@ -151,7 +159,7 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
     redeploy resets state.json's "history" back to empty (no persistent disk
     on the free plan -- see module docstring) even when real trades already
     closed, showing "누적손익(로컬) 0.0000" next to a nonzero
-    "거래소손익(7일)" for the very same symbol. decisions.jsonl isn't
+    "거래소손익(30일)" for the very same symbol. decisions.jsonl isn't
     immune to the same reset, but in practice it's the log that's already
     relied on for "성과 리뷰" above, so reusing it here keeps the two
     sections showing the same number for the same symbol instead of
@@ -175,6 +183,26 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
 
     now = time.time()
+
+    # ONE fetch covering every configured symbol, not one per symbol -- see
+    # _agg_exchange_pnl_cache's module-level comment for why. On failure,
+    # keep serving whatever was cached last rather than resetting every
+    # symbol's exchange PnL to unknown.
+    if now - _agg_exchange_pnl_cache["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
+        try:
+            since_ms = int((now - _AGG_EXCHANGE_PNL_LOOKBACK_SEC) * 1000)
+            records = client.get_closed_pnl_since(since_ms)
+            by_symbol: dict[str, float] = {}
+            for r in records:
+                sym = r.get("symbol")
+                if sym:
+                    by_symbol[sym] = by_symbol.get(sym, 0.0) + float(r.get("closedPnl") or 0.0)
+            _agg_exchange_pnl_cache["by_symbol"] = by_symbol
+            _agg_exchange_pnl_cache["ts"] = now
+        except Exception:
+            pass  # keep serving the last good snapshot, if any
+    exchange_pnl_by_symbol = _agg_exchange_pnl_cache["by_symbol"]
+
     views = []
     for symbol in symbols:
         trade = all_trades.get(symbol)
@@ -221,29 +249,18 @@ def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> li
         # Render's free plan has no persistent disk -- a redeploy wipes
         # state AND decisions.jsonl alike, so cumulative_pnl/trade_count
         # above can still read 0 for a symbol that traded before the most
-        # recent restart. Cross-check against Bybit's own closed-pnl ledger
-        # for the last 7 days (its query window per call), cached per
-        # symbol, so a real loss/gain total is visible even when every local
+        # recent restart. Bybit's own closed-pnl ledger (fetched once for
+        # the whole account above, not per symbol) doesn't have that
+        # problem -- a real loss/gain total is visible even when every local
         # log was just wiped. This doesn't attempt to reconstruct the
         # itemized table above -- leverage/reason ("sl_tp_hit" vs
         # "hourly_cutoff") are this module's own judgment calls, not
         # something the exchange record carries.
-        cache_entry = _agg_exchange_pnl_cache.setdefault(symbol, {"ts": 0.0, "value": None})
-        if now - cache_entry["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
-            try:
-                since_ms = int((now - 7 * 24 * 3600) * 1000)
-                records = client.get_closed_pnl_since(since_ms)
-                cache_entry["value"] = sum(
-                    float(r.get("closedPnl") or 0.0) for r in records if r.get("symbol") == symbol)
-                cache_entry["ts"] = now
-            except Exception:
-                pass  # keep serving the last good value, if any
-
         views.append({"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
                       "trade_count": trade_count,
                       "skip_reason": skip.get("reason") if skip else None,
                       "symbol": symbol,
-                      "exchange_pnl_7d": cache_entry["value"]})
+                      "exchange_pnl_30d": exchange_pnl_by_symbol.get(symbol)})
     return views
 
 
@@ -548,10 +565,10 @@ TEMPLATE = """
     <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
     <div class="grid" style="margin-bottom:10px;">
       <div><div class="stat-label">누적손익(로컬) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
-      <div><div class="stat-label">거래소손익(7일) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.exchange_pnl_7d) }}</div></div>
+      <div><div class="stat-label">거래소손익(30일) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.exchange_pnl_30d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.exchange_pnl_30d) }}</div></div>
     </div>
     <table>
-      <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(7일)</th><th>거래수</th><th></th></tr>
+      <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(30일)</th><th>거래수</th><th></th></tr>
       {% for agg in aggressive_list %}
       <tr>
         <td>{{ agg.symbol }}</td>
@@ -565,14 +582,14 @@ TEMPLATE = """
           {% endif %}
         </td>
         <td class="{{ 'pnl-pos' if agg.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(agg.cumulative_pnl) }}</td>
-        <td class="{{ 'pnl-pos' if agg.exchange_pnl_7d is not none and agg.exchange_pnl_7d >= 0 else 'pnl-neg' }}">
-          {{ '%.4f'|format(agg.exchange_pnl_7d) if agg.exchange_pnl_7d is not none else '-' }}</td>
+        <td class="{{ 'pnl-pos' if agg.exchange_pnl_30d is not none and agg.exchange_pnl_30d >= 0 else 'pnl-neg' }}">
+          {{ '%.4f'|format(agg.exchange_pnl_30d) if agg.exchange_pnl_30d is not none else '-' }}</td>
         <td>{{ agg.trade_count }}</td>
         <td class="small"><a href="/backtest?token={{ token }}&symbol={{ agg.symbol }}">백테스트</a></td>
       </tr>
       {% endfor %}
     </table>
-    <div class="small" style="margin-top:6px;">메인 봇과 분리된 별도 상태 파일 사용. 각 심볼의 상세 신호/점수는 아래 "최근 판단 로그"에서 확인하세요. 배포/재시작 시 로컬 기록은 리셋되지만 거래소손익(7일)은 Bybit 체결 내역 기준이라 유지됩니다.</div>
+    <div class="small" style="margin-top:6px;">메인 봇과 분리된 별도 상태 파일 사용. 각 심볼의 상세 신호/점수는 아래 "최근 판단 로그"에서 확인하세요. 배포/재시작 시 로컬 기록은 리셋되지만 거래소손익(30일)은 Bybit 체결 내역 기준이라 유지됩니다.</div>
   </div>
   {% endif %}
 
@@ -1105,7 +1122,7 @@ def index():
     aggressive_list = _build_aggressive_btc_views(client, perf["by_symbol"])
     aggressive_totals = {
         "cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list),
-        "exchange_pnl_7d": sum(a["exchange_pnl_7d"] for a in aggressive_list if a["exchange_pnl_7d"] is not None),
+        "exchange_pnl_30d": sum(a["exchange_pnl_30d"] for a in aggressive_list if a["exchange_pnl_30d"] is not None),
     }
 
     return render_template_string(
