@@ -261,6 +261,64 @@ def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     return views
 
 
+def _build_closed_trade_report(client: BybitClient, start_ms: int, end_ms: int, log_dir: str) -> list[dict]:
+    """aggressive_btc's full closed-trade report for an arbitrary date range
+    (the /history page), sourced entirely from Bybit's own closed-pnl
+    ledger -- same reasoning as AGGRESSIVE_BTC_PNL_START above: local logs
+    reset on every Render redeploy, the exchange record doesn't, so it's the
+    only source that can answer "every trade since 10/01" reliably.
+
+    ROI% is derived from the record's own cumEntryValue/leverage (= the
+    margin that was committed), not from any local file -- fully exchange-
+    sourced, like cumulative_pnl in _build_aggressive_btc_views.
+
+    "청산 사유" (exit reason, e.g. "hourly_cutoff"/"breakeven_stop"/
+    "rotated_out"/"sl_tp_hit") is the one thing Bybit's own record doesn't
+    carry -- that's this bot's own judgment call, not the exchange's. Best-
+    effort matched against decisions.jsonl's "exit" events by symbol + the
+    closest timestamp within a loose tolerance; shows "-" for any trade
+    whose local record didn't survive to explain it (a redeploy before this
+    page is loaded, or simply before this exit was logged).
+    """
+    try:
+        records = client.get_closed_pnl_since(start_ms, end_time_ms=end_ms)
+    except Exception:
+        records = []
+
+    local_exits: dict[str, list[tuple[float, str]]] = {}
+    for d in read_recent_decisions(log_dir, limit=5000):
+        if d.get("event") == "exit" and d.get("symbol") and d.get("reason"):
+            local_exits.setdefault(d["symbol"], []).append((d.get("ts", 0.0), d["reason"]))
+
+    def _find_reason(symbol: str, exit_ts: float) -> str:
+        candidates = local_exits.get(symbol)
+        if not candidates:
+            return "-"
+        closest_ts, closest_reason = min(candidates, key=lambda c: abs(c[0] - exit_ts))
+        return closest_reason if abs(closest_ts - exit_ts) <= 900 else "-"  # within 15 minutes
+
+    rows = []
+    for r in records:
+        try:
+            symbol = r["symbol"]
+            side = "long" if r.get("side") == "Buy" else "short"
+            pnl = float(r.get("closedPnl") or 0.0)
+            leverage = float(r.get("leverage") or 0.0)
+            cum_entry_value = float(r.get("cumEntryValue") or 0.0)
+            exit_ts = float(r.get("updatedTime") or 0) / 1000.0
+        except (KeyError, ValueError, TypeError):
+            continue
+        margin = (cum_entry_value / leverage) if leverage > 0 else 0.0
+        roi = (pnl / margin * 100.0) if margin > 0 else None
+        rows.append({
+            "closed_at": exit_ts, "time_str": _kst_str(exit_ts),
+            "symbol": symbol, "side": side, "roi_pct": roi, "pnl": pnl,
+            "reason": _find_reason(symbol, exit_ts),
+        })
+    rows.sort(key=lambda row: row["closed_at"], reverse=True)
+    return rows
+
+
 def _build_equity_curve(history: list[dict]) -> dict | None:
     """SVG polyline of cumulative realized PnL over time, in chronological order,
     from state.history (closed-trade summaries). Not a full tick-by-tick equity
@@ -367,6 +425,7 @@ TEMPLATE = """
 </head>
 <body>
   <button id="copy-btn" class="copy-btn" onclick="copyReview()">📋 리뷰 복사</button>
+  <a href="/history?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">📄 청산 이력 리포트</a>
   <div id="report">
   <h1>Bybit Futures Bot</h1>
   <span class="mode {{ 'testnet' if testnet else 'live' }}">{{ 'TESTNET (모의투자)' if testnet else 'LIVE (실거래)' }}</span>
@@ -908,6 +967,136 @@ _BACKTEST_SWEEP_TEMPLATE = """
 </body>
 </html>
 """
+
+
+_HISTORY_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>청산 이력 리포트</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  h1 { font-size:1.2rem; margin-bottom:4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap:8px; }
+  .stat-label { font-size:0.75rem; color:#8b949e; }
+  .stat-value { font-size:1.1rem; font-weight:600; }
+  .pos-long { color:#7ee787; } .pos-short { color:#ff7b72; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  input { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:6px; }
+  label { font-size:0.8rem; color:#8b949e; margin-right:4px; }
+  .run-btn, .copy-btn { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
+             padding:8px 14px; font-size:0.85rem; }
+  .copy-btn:active, .run-btn:active { background:#30363d; }
+  a { color:#7ee787; }
+</style>
+</head>
+<body>
+  <button id="copy-btn" class="copy-btn" style="float:right;" onclick="copyHistory()">📋 복사</button>
+  <h1>⚡ Aggressive 청산 이력 리포트</h1>
+  <div class="small" style="margin-bottom:10px;">Bybit 거래소 체결 기록 기준 (재배포돼도 리셋 안 됨). "청산 사유"만 로컬 로그 기반이라, 로그가 리셋된 구간은 "-"로 표시됩니다.</div>
+
+  <form method="GET" action="/history" class="card">
+    <input type="hidden" name="token" value="{{ token }}">
+    <label>시작일</label><input type="date" name="start" value="{{ start }}">
+    <label style="margin-left:10px;">종료일</label><input type="date" name="end" value="{{ end }}">
+    <button type="submit" class="run-btn" style="margin-left:10px;">조회</button>
+  </form>
+
+  <div id="report">
+  <div class="card">
+    <div class="grid">
+      <div><div class="stat-label">거래 수</div><div class="stat-value">{{ trade_count }}</div></div>
+      <div><div class="stat-label">승률</div><div class="stat-value">{{ '%.0f'|format(win_rate) + '%' if win_rate is not none else '-' }}</div></div>
+      <div><div class="stat-label">누적 손익</div><div class="stat-value {{ 'pnl-pos' if total_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(total_pnl) }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if rows %}
+    <table>
+      <tr><th>청산 이력</th><th>종목명</th><th>포지션</th><th>손익률</th><th>손익액</th><th>청산 사유</th></tr>
+      {% for r in rows %}
+      <tr>
+        <td class="small">{{ r.time_str }}</td>
+        <td>{{ r.symbol }}</td>
+        <td class="{{ 'pos-long' if r.side == 'long' else 'pos-short' }}">{{ r.side.upper() }}</td>
+        <td class="{{ 'pnl-pos' if r.roi_pct is not none and r.roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(r.roi_pct) + '%' if r.roi_pct is not none else '-' }}</td>
+        <td class="{{ 'pnl-pos' if r.pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(r.pnl) }}</td>
+        <td class="small">{{ r.reason }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="small">이 기간엔 청산된 거래가 없어요.</div>
+    {% endif %}
+  </div>
+  </div>
+
+  <a href="/?token={{ token }}">← 대시보드로 돌아가기</a>
+
+  <script>
+    function copyHistory() {
+      const text = document.getElementById('report').innerText;
+      const btn = document.getElementById('copy-btn');
+      const original = btn.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = '복사됨!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      }).catch(() => {
+        btn.textContent = '복사 실패';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>
+"""
+
+
+@app.route("/history")
+def history_route():
+    """New report tab: aggressive_btc's closed-trade history for an
+    arbitrary date range (?start=/?end=, both YYYY-MM-DD, defaulting to
+    AGGRESSIVE_BTC_PNL_START..today), sourced from Bybit's own closed-pnl
+    ledger via _build_closed_trade_report. GET with querystring filters so
+    a specific range is itself bookmarkable/shareable; the copy button lets
+    the filtered rows be copied out as plain text (see copyHistory()) for
+    pasting elsewhere.
+    """
+    _check_token()
+    default_start = AGGRESSIVE_BTC_PNL_START.strftime("%Y-%m-%d")
+    default_end = datetime.now(KST).strftime("%Y-%m-%d")
+    start_str = request.args.get("start", default_start)
+    end_str = request.args.get("end", default_end)
+    try:
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=KST)
+        # Inclusive of the whole end day -- a date-only input means "through
+        # the end of that day," not midnight at its start.
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=KST) + timedelta(days=1)
+    except ValueError:
+        abort(400)
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
+
+    log_dir = os.getenv("LOG_DIR", "logs")
+    rows = _build_closed_trade_report(client, start_ms, end_ms, log_dir)
+
+    total_pnl = sum(r["pnl"] for r in rows)
+    wins = sum(1 for r in rows if r["pnl"] > 0)
+    win_rate = (wins / len(rows) * 100.0) if rows else None
+
+    return render_template_string(
+        _HISTORY_TEMPLATE, rows=rows, start=start_str, end=end_str,
+        total_pnl=total_pnl, win_rate=win_rate, trade_count=len(rows),
+        token=request.args.get("token", ""),
+    )
 
 
 @app.route("/backtest")

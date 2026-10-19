@@ -90,6 +90,25 @@ def test_get_closed_pnl_since_walks_backward_across_multiple_windows():
     assert calls[2].kwargs["startTime"] == start_ms
 
 
+def test_get_closed_pnl_since_honors_an_explicit_end_time_instead_of_now():
+    # For an arbitrary historical date range (e.g. a dashboard report), the
+    # walk-back must start from the given end_time_ms, not from now.
+    client = _make_client()
+    end_ms = 1_700_000_000_000  # some date well in the past, not "now"
+    start_ms = end_ms - 3 * 24 * 3600 * 1000  # 3 days before that end date
+    client.session.get_closed_pnl.return_value = {
+        "retCode": 0, "result": {"list": [{"symbol": "AUSDT", "closedPnl": "1.0"}], "nextPageCursor": ""},
+    }
+
+    records = client.get_closed_pnl_since(start_ms, end_time_ms=end_ms)
+
+    assert records == [{"symbol": "AUSDT", "closedPnl": "1.0"}]
+    client.session.get_closed_pnl.assert_called_once()
+    call_kwargs = client.session.get_closed_pnl.call_args.kwargs
+    assert call_kwargs["endTime"] == end_ms
+    assert call_kwargs["startTime"] == start_ms
+
+
 def test_get_available_balance_usdt_parses_field():
     client = _make_client()
     client.session.get_wallet_balance.return_value = {
