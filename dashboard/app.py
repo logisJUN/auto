@@ -10,6 +10,7 @@ Run: python -m dashboard.app
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,8 @@ from pathlib import Path
 
 import requests
 from flask import Flask, abort, redirect, render_template_string, request
+
+logger = logging.getLogger("dashboard.app")
 
 from bot.backtest import fetch_historical_klines, simulate
 from bot.config import load_config
@@ -380,6 +383,12 @@ TEMPLATE = """
 
   <div class="card">
     <h2 style="font-size:1rem;">열린 포지션</h2>
+    {% if exchange_query_error %}
+    <div class="small pnl-neg" style="margin-bottom:6px;">
+      ⚠️ 거래소 포지션 조회 실패 ({{ exchange_query_error }}) -- "수동" 포지션 목록이 비어있어도 실제로는 없는 게 아니라
+      이번 새로고침에서 조회가 안 된 것일 수 있어요. 다시 새로고침 해보세요.
+    </div>
+    {% endif %}
     {% if positions %}
     <table>
       <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현손익</th></tr>
@@ -987,10 +996,19 @@ def index():
             tracked_symbols |= set(StateStore(agg_state_path).snapshot().get("trades", {}).keys())
         except Exception:
             pass
+    exchange_query_error = None
     try:
         exchange_positions = client.get_all_open_positions()
-    except BybitAPIError:
+    except BybitAPIError as exc:
+        # Previously silently swallowed, which made "no manual positions
+        # found" indistinguishable from "couldn't even check" -- surfaced
+        # on the dashboard now (see exchange_query_error in the template)
+        # instead of only in logs, so a real open position that isn't
+        # showing up anywhere doesn't look identical to there genuinely
+        # being none.
         exchange_positions = []
+        exchange_query_error = str(exc)
+        logger.warning("dashboard: get_all_open_positions failed: %s", exc)
     for pos in exchange_positions:
         symbol = pos["symbol"]
         if symbol in tracked_symbols:
@@ -1084,6 +1102,7 @@ def index():
         open_count=len(positions),
         max_positions=cfg.get("risk", "max_concurrent_positions", default=1),
         positions=positions,
+        exchange_query_error=exchange_query_error,
         watchlist=watchlist,
         trade_history=trade_history,
         equity_curve=equity_curve,

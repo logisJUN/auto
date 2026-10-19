@@ -936,8 +936,22 @@ def test_reconcile_ignores_a_symbol_not_in_the_configured_aggressive_btc_set(tmp
 
 def test_reconcile_tolerates_the_exchange_call_failing(tmp_path):
     client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    notifier.send = MagicMock()
     client.get_all_open_positions.side_effect = BybitAPIError("network error")
+    aggressive_btc._reconcile_failure_notify_state["last_ts"] = 0.0  # fresh throttle state for this test
 
     _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)  # must not raise
 
     assert state.snapshot()["trades"] == {}
+    notifier.send.assert_called_once()  # surfaced, not purely silent
+
+
+def test_reconcile_failure_notification_is_throttled(tmp_path):
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    notifier.send = MagicMock()
+    client.get_all_open_positions.side_effect = BybitAPIError("network error")
+    aggressive_btc._reconcile_failure_notify_state["last_ts"] = time.time()  # just notified
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    notifier.send.assert_not_called()  # still within the throttle window

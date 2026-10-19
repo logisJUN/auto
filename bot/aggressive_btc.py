@@ -129,6 +129,13 @@ MIN_ORDER_NOTIONAL_USDT = 5.0
 # the dashboard's "최근 판단 로그" without flooding the (ephemeral, redeploy-
 # wiped) log file.
 SIGNAL_LOG_INTERVAL_SEC = 300
+# If _reconcile_orphaned_positions's exchange query keeps failing (e.g. a
+# persistent rate limit), it would otherwise only ever show up in Render's
+# application logs -- the user has no easy way to notice that in real time.
+# Throttled to avoid spamming Telegram every ~30s loop iteration if the
+# failure persists.
+RECONCILE_FAILURE_NOTIFY_INTERVAL_SEC = 600
+_reconcile_failure_notify_state = {"last_ts": 0.0}
 
 TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
@@ -809,8 +816,12 @@ def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifi
     """
     try:
         open_positions = client.get_all_open_positions()
-    except BybitAPIError:
+    except BybitAPIError as exc:
         logger.exception("aggressive_btc: failed to reconcile open positions against local state")
+        now = time.time()
+        if now - _reconcile_failure_notify_state["last_ts"] > RECONCILE_FAILURE_NOTIFY_INTERVAL_SEC:
+            _reconcile_failure_notify_state["last_ts"] = now
+            notifier.send(f"[aggressive_btc] 포지션 재연결 조회 실패 (반복되면 Render 로그 확인 필요): {exc}")
         return
 
     tracked = set(state.snapshot().get("trades", {}).keys())
