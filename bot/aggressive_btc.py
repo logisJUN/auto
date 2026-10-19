@@ -78,13 +78,20 @@ Design, as specified (per symbol, via SymbolConfig):
       taken and a DIFFERENT symbol's signal crosses ENTRY_THRESHOLD (and
       survives the 2-tick confirmation in 3 above), the currently open
       position with the highest ROI% (least loss, or most profit -- the one
-      that costs least to give up) is closed to make room. This only
+      that costs least to give up), AMONG those already open at least
+      ROTATION_MIN_HOLD_MINUTES, is closed to make room. This only
       actually frees the slot the new signal needs if the rotated-out
       position happened to be on that side; if the better performer is on
       the OPPOSITE side, the new signal still can't enter that tick even
       though the rotation happened -- an accepted trade-off of always
       giving up the cheapest position rather than only the one that would
-      help the specific new signal.
+      help the specific new signal. The minimum-hold exclusion exists so a
+      burst of several symbols crossing threshold around the same time
+      can't chain-evict each other within minutes of entering (observed
+      live: a ~2-minute window of this churn cost -1.17 USDT, nearly a
+      whole day's net result) -- a freshly-opened position can still exit
+      via its own SL/TP/hourly-cutoff/disaster-stop in the meantime, just
+      not get evicted for a different symbol.
   6. 50% of equity used as margin per trade (safe here specifically because
      of the at-most-one-long-and-one-short cap above -- it was NOT safe to
      also give every stock symbol 50% without that cap, since several could
@@ -181,6 +188,22 @@ DISASTER_STOP_MULTIPLIER = 2.0
 # pattern that motivated the main bot's version).
 SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES = 2
 SYMBOL_PAUSE_DURATION_MIN = 360  # 6 hours
+# Capacity rotation (see try_enter()) only considers a currently open
+# position a rotation candidate once it's been open at least this long.
+# Without this, a burst of several symbols crossing ENTRY_THRESHOLD around
+# the same time (e.g. a broad market move) can cause a position to be
+# opened and then immediately rotated back out by the next symbol's signal,
+# which itself gets rotated out by the one after that -- a rapid merry-go-
+# round of tiny, barely-established positions each taking a small loss.
+# Observed live: a ~2-minute window produced 10 closes (8 of them
+# rotated_out) for a combined -1.17 USDT, nearly the day's entire net
+# result. A freshly-opened position is excluded from being the "best
+# performer" to rotate out (even if it currently reads as the best ROI%)
+# until it clears this age -- it can still be closed by its OWN management
+# rules (SL/TP/hourly cutoff/disaster stop) in the meantime, just not
+# evicted to make room for a different symbol.
+ROTATION_MIN_HOLD_MINUTES = 10
+ROTATION_MIN_HOLD_SEC = ROTATION_MIN_HOLD_MINUTES * 60
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
@@ -652,7 +675,8 @@ class AggressiveBTCStrategy:
             # help this particular signal).
             best = self._best_performer_among_open_positions()
             if best is None:
-                self.state.set_skip_reason(self.symbol, "롱/숏 포지션 모두 이미 보유 중 (방향당 1개 제한)")
+                self.state.set_skip_reason(
+                    self.symbol, "롱/숏 포지션 모두 이미 보유 중 (교체 대상 없음 - 최소 보유시간 미충족 또는 조회 실패)")
                 return
             best_symbol, best_trade = best
             logger.info("aggressive_btc: capacity full -- rotating out %s (best performer among open "
@@ -856,14 +880,20 @@ class AggressiveBTCStrategy:
 
     def _best_performer_among_open_positions(self) -> tuple[str, dict] | None:
         """For the capacity-rotation logic in try_enter(): among the (at
-        most 2) currently open aggressive_btc positions, finds the one with
-        the HIGHEST current ROI% (least loss, or most profit) -- the one
-        that costs least to give up. Returns (symbol, trade) or None if no
-        position's exchange data could be read.
+        most 2) currently open aggressive_btc positions that have been open
+        at least ROTATION_MIN_HOLD_SEC, finds the one with the HIGHEST
+        current ROI% (least loss, or most profit) -- the one that costs
+        least to give up. Returns (symbol, trade) or None if no eligible
+        position's exchange data could be read (including the case where
+        every open position is still too freshly opened to be rotated --
+        see ROTATION_MIN_HOLD_MINUTES).
         """
         trades = self.state.snapshot().get("trades", {})
+        now = time.time()
         best: tuple[str, dict, float] | None = None
         for sym, trade in trades.items():
+            if now - trade.get("opened_at", 0) < ROTATION_MIN_HOLD_SEC:
+                continue
             try:
                 pos = self.client.get_position(sym)
             except BybitAPIError:

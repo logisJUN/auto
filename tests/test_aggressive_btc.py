@@ -935,16 +935,20 @@ def test_try_enter_skips_when_its_own_direction_matches_an_already_open_side(tmp
 
 # -- capacity rotation (both sides full) ---------------------------------------------------------
 
-def _two_open_trades(state):
+def _two_open_trades(state, opened_at=None):
+    # Past ROTATION_MIN_HOLD_SEC by default -- rotation-eligible, like most
+    # rotation tests need. Tests of the min-hold exclusion itself override this.
+    if opened_at is None:
+        opened_at = time.time() - aggressive_btc.ROTATION_MIN_HOLD_SEC - 60
     state.set_trade("AAPLUSDT", {
         "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
         "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
-        "opened_at": time.time(), "last_hour_checked": 0,
+        "opened_at": opened_at, "last_hour_checked": 0,
     })
     state.set_trade("TSLAUSDT", {
         "symbol": "TSLAUSDT", "side": "short", "entry_price": 300.0, "qty": 1.0,
         "margin": 50.0, "leverage": 10.0, "current_sl": 310.0, "current_tp": 290.0,
-        "opened_at": time.time(), "last_hour_checked": 0,
+        "opened_at": opened_at, "last_hour_checked": 0,
     })
 
 
@@ -1024,6 +1028,86 @@ def test_try_enter_rotation_closes_best_performer_but_still_skips_if_side_still_
     skip = state.get_skip_reason(SYMBOL)
     assert skip is not None
     assert "방향이 맞지 않음" in skip["reason"]
+
+
+def test_try_enter_does_not_rotate_when_both_open_positions_are_still_within_min_hold_time(tmp_path):
+    # Both AAPLUSDT and TSLAUSDT were just opened (within ROTATION_MIN_HOLD_SEC)
+    # -- neither is eligible to be rotated out yet, even though AAPLUSDT reads
+    # as a clear best performer by ROI%. Guards against the observed-live
+    # churn where a burst of signals chain-evict freshly-opened positions.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "long"}
+    _two_open_trades(state, opened_at=time.time() - 30)  # 30s old, well under the min hold
+
+    def fake_get_position(sym):
+        if sym == "AAPLUSDT":
+            return {"symbol": sym, "side": "Buy", "size": 1.0, "entry_price": 200.0,
+                    "unrealized_pnl": 5.0, "position_idx": 0, "stop_loss": 190.0, "take_profit": 210.0}
+        if sym == "TSLAUSDT":
+            return {"symbol": sym, "side": "Sell", "size": 1.0, "entry_price": 300.0,
+                    "unrealized_pnl": -2.5, "position_idx": 0, "stop_loss": 310.0, "take_profit": 290.0}
+        return None
+
+    client.get_position.side_effect = fake_get_position
+
+    strategy.try_enter()
+
+    client.close_position.assert_not_called()  # nothing rotated out
+    client.open_position.assert_not_called()
+    assert state.get_trade("AAPLUSDT") is not None
+    assert state.get_trade("TSLAUSDT") is not None
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "최소 보유시간" in skip["reason"]
+
+
+def test_try_enter_rotation_only_considers_positions_past_min_hold_time(tmp_path):
+    # AAPLUSDT is the better performer (+10% ROI) but was JUST opened (30s
+    # ago) -- too fresh to rotate out. TSLAUSDT is the worse performer
+    # (-5% ROI) but has been open well past the min hold -- it's the ONLY
+    # eligible candidate, so it gets rotated out despite being the worse
+    # performer overall.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "short"}
+    state.set_trade("AAPLUSDT", {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time() - 30, "last_hour_checked": 0,
+    })
+    state.set_trade("TSLAUSDT", {
+        "symbol": "TSLAUSDT", "side": "short", "entry_price": 300.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 310.0, "current_tp": 290.0,
+        "opened_at": time.time() - aggressive_btc.ROTATION_MIN_HOLD_SEC - 60, "last_hour_checked": 0,
+    })
+
+    def fake_get_position(sym):
+        if sym == "AAPLUSDT":
+            return {"symbol": sym, "side": "Buy", "size": 1.0, "entry_price": 200.0,
+                    "unrealized_pnl": 5.0, "position_idx": 0, "stop_loss": 190.0, "take_profit": 210.0}  # +10%
+        if sym == "TSLAUSDT":
+            return {"symbol": sym, "side": "Sell", "size": 1.0, "entry_price": 300.0,
+                    "unrealized_pnl": -2.5, "position_idx": 0, "stop_loss": 310.0, "take_profit": 290.0}  # -5%
+        return {"symbol": sym, "side": "Sell", "size": 1.0, "entry_price": 140.0,
+                "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 150.0, "take_profit": 130.0}
+
+    client.get_position.side_effect = fake_get_position
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 300.0
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.open_position.return_value = {}
+
+    strategy.try_enter()
+
+    client.close_position.assert_called_once_with("TSLAUSDT", "short", 1.0)
+    assert state.get_trade("TSLAUSDT") is None
+    assert state.get_trade("AAPLUSDT") is not None  # untouched -- too fresh to rotate
+    # Rotating TSLAUSDT out freed the short side -- this symbol's confirmed
+    # short signal entered.
+    client.open_position.assert_called_once()
+    assert state.get_trade(SYMBOL) is not None
 
 
 def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_path):
