@@ -67,6 +67,24 @@ Design, as specified (per symbol, via SymbolConfig):
   4. Stop-loss at -5% ROI.
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
+  5b. Breakeven stop: once a position has been open >= BREAKEVEN_STOP_AFTER_HOURS
+      (2h) and was profitable at some point without ever reaching TP, close
+      it the moment ROI retraces back to <= 0 -- checked every tick (not
+      just at hour-mark boundaries like rule 5), so a profit being given
+      back gets caught as it happens rather than waiting for the next hourly
+      checkpoint or a real loss. Doesn't apply to a position that's simply
+      been losing the whole time (rule 5/SL already cover that).
+  5c. Capacity rotation: when both the long and short slots are already
+      taken and a DIFFERENT symbol's signal crosses ENTRY_THRESHOLD (and
+      survives the 2-tick confirmation in 3 above), the currently open
+      position with the highest ROI% (least loss, or most profit -- the one
+      that costs least to give up) is closed to make room. This only
+      actually frees the slot the new signal needs if the rotated-out
+      position happened to be on that side; if the better performer is on
+      the OPPOSITE side, the new signal still can't enter that tick even
+      though the rotation happened -- an accepted trade-off of always
+      giving up the cheapest position rather than only the one that would
+      help the specific new signal.
   6. 50% of equity used as margin per trade (safe here specifically because
      of the at-most-one-long-and-one-short cap above -- it was NOT safe to
      also give every stock symbol 50% without that cap, since several could
@@ -121,6 +139,15 @@ TESTNET = False   # <-- flip this one line to go live. See module docstring.
 # -- shared across every configured symbol ---------------------------------------------------------
 TIMEFRAME = "60"                # Bybit kline interval string for 1-hour candles
 HOURLY_CUTOFF_PCT = 0.0         # at each full hour open, exit if ROI <= this
+# Breakeven stop: once a position has been open this long AND has been
+# profitable (ROI > 0) at some point without ever reaching TP, manage_open_position()
+# watches every tick (not just at hour-mark boundaries, unlike HOURLY_CUTOFF_PCT
+# above) and closes it the moment ROI retraces back down to <= 0 -- locking in
+# roughly breakeven instead of letting a real profit slide all the way into a
+# loss while waiting on TP or the next hourly checkpoint. Does NOT apply to a
+# position that's simply been losing the whole time (HOURLY_CUTOFF_PCT/SL
+# already handle that case) -- only to one that WAS ahead and gave it back.
+BREAKEVEN_STOP_AFTER_HOURS = 2.0
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
@@ -526,16 +553,10 @@ class AggressiveBTCStrategy:
         if self.state.get_trade(self.symbol) is not None:
             return
 
-        # Capacity cap: at most one LONG and one SHORT may be open at a time
-        # across all 39 configured symbols (not one overall) -- see module
-        # docstring. If both sides are already taken, this symbol is blocked
-        # no matter what direction its own signal turns out to be, so skip
-        # the kline fetch entirely rather than compute a signal we can't act on.
-        existing_sides = self.state.open_trade_sides()
-        if len(existing_sides) >= 2:
-            self.state.set_skip_reason(self.symbol, "롱/숏 포지션 모두 이미 보유 중 (방향당 1개 제한)")
-            return
-
+        # No early "capacity full, skip the kline fetch" shortcut anymore --
+        # a confirmed signal here may trigger rotation (see below) even when
+        # both sides are already taken, so the signal has to be computed
+        # regardless of current capacity.
         signal = self.get_signal()
         # Unthrottled, unlike _log_signal_check's decisions.jsonl record below --
         # this is the only proof-of-life trace for a "still neutral" tick
@@ -557,13 +578,6 @@ class AggressiveBTCStrategy:
             return
 
         direction = signal["direction"]
-        if direction in existing_sides:
-            # The one side this symbol wants is already occupied by another
-            # symbol -- the OPPOSITE side would still be free (checked
-            # above), just not this one.
-            self.state.set_skip_reason(
-                self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 (방향당 1개 제한)")
-            return
 
         # Entry confirmation: don't act on the very first tick a direction
         # crosses the threshold -- a lower ENTRY_THRESHOLD trades on weaker
@@ -571,14 +585,54 @@ class AggressiveBTCStrategy:
         # on the next check) more likely to trigger an entry that immediately
         # loses. Requiring the SAME direction on two consecutive checks
         # filters that out, at the cost of entering one check later than the
-        # threshold itself was crossed.
+        # threshold itself was crossed. Applies equally to a signal that
+        # will go on to trigger rotation below -- a flickering signal
+        # shouldn't be able to bump a real position out either.
         if self._pending_entry is None or self._pending_entry.get("direction") != direction:
             self._pending_entry = {"direction": direction}
             self.state.set_skip_reason(
                 self.symbol, f"{direction} 1차 확인됨 - 다음 체크에서 같은 방향 유지되면 진입 "
                              f"({self._format_signal_breakdown(signal)})")
             return
-        self._pending_entry = None  # confirmed -- proceed to the actual entry below
+        self._pending_entry = None  # confirmed
+
+        # Capacity cap: at most one LONG and one SHORT open at a time across
+        # all 39 symbols (see module docstring).
+        existing_sides = self.state.open_trade_sides()
+        if len(existing_sides) >= 2:
+            # Both sides already taken -- rather than just skip this
+            # confirmed signal, give up whichever of the 2 open positions
+            # currently costs least to let go (highest ROI%, i.e. least
+            # loss or most profit) and try to take its place. Only actually
+            # frees up THIS signal's side if the position closed happened to
+            # be on it -- if the worse-but-matching-side position gets
+            # outranked by a better-but-wrong-side one, this symbol still
+            # can't enter this tick (the needed side is still occupied), but
+            # the rotation still happened (that's the explicit trade-off
+            # accepted for this rule: always let go of the cheapest-to-exit
+            # position when capacity is full, not just the one that would
+            # help this particular signal).
+            best = self._best_performer_among_open_positions()
+            if best is None:
+                self.state.set_skip_reason(self.symbol, "롱/숏 포지션 모두 이미 보유 중 (방향당 1개 제한)")
+                return
+            best_symbol, best_trade = best
+            logger.info("aggressive_btc: capacity full -- rotating out %s (best performer among open "
+                        "positions) to try to free room for %s %s", best_symbol, self.symbol, direction)
+            self._close_and_settle(best_symbol, best_trade, "rotated_out")
+            existing_sides = self.state.open_trade_sides()
+            if direction in existing_sides:
+                self.state.set_skip_reason(
+                    self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 "
+                                 f"(포지션 회전은 발생했으나 방향이 맞지 않음)")
+                return
+        elif direction in existing_sides:
+            # Only one side is occupied, and it happens to be this signal's
+            # side -- the rotation rule above is specifically for when BOTH
+            # sides are already taken, not this case, so just wait.
+            self.state.set_skip_reason(
+                self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 (방향당 1개 제한)")
+            return
 
         equity = self.client.get_equity_usdt()
         margin = equity * (self.cfg.margin_pct_of_equity / 100.0)
@@ -720,37 +774,71 @@ class AggressiveBTCStrategy:
         if exchange_position is None:
             # SL or TP already fired on the exchange side -- nothing left to
             # close, just settle locally.
-            self._close_and_settle(trade, "sl_tp_hit", already_closed=True)
+            self._close_and_settle(self.symbol, trade, "sl_tp_hit", already_closed=True)
             return
 
         hours_open = (time.time() - trade["opened_at"]) / 3600.0
         current_roi = roi_pct(exchange_position["unrealized_pnl"], trade["margin"])
+
+        if current_roi > 0:
+            trade["was_profitable"] = True
+
+        # Breakeven stop -- see BREAKEVEN_STOP_AFTER_HOURS. Checked every
+        # tick (not just at hour-mark boundaries), so a retrace gets caught
+        # as soon as it happens rather than waiting for the next hourly check.
+        if (hours_open >= BREAKEVEN_STOP_AFTER_HOURS and trade.get("was_profitable") and current_roi <= 0):
+            logger.info("aggressive_btc: %s breakeven stop at hour %.1f -- was profitable, now ROI=%.2f%%",
+                        self.symbol, hours_open, current_roi)
+            self._close_and_settle(self.symbol, trade, "breakeven_stop")
+            return
+
         should_close, new_mark = should_hourly_cutoff(hours_open, current_roi, trade["last_hour_checked"])
         trade["last_hour_checked"] = new_mark
         if should_close:
             logger.info("aggressive_btc: %s hourly cutoff at hour %d, ROI=%.2f%% still negative -- closing",
                         self.symbol, new_mark, current_roi)
-            self._close_and_settle(trade, "hourly_cutoff")
+            self._close_and_settle(self.symbol, trade, "hourly_cutoff")
             return
 
         self.state.set_trade(self.symbol, trade)
 
-    def _close_and_settle(self, trade: dict, reason: str, already_closed: bool = False):
+    def _best_performer_among_open_positions(self) -> tuple[str, dict] | None:
+        """For the capacity-rotation logic in try_enter(): among the (at
+        most 2) currently open aggressive_btc positions, finds the one with
+        the HIGHEST current ROI% (least loss, or most profit) -- the one
+        that costs least to give up. Returns (symbol, trade) or None if no
+        position's exchange data could be read.
+        """
+        trades = self.state.snapshot().get("trades", {})
+        best: tuple[str, dict, float] | None = None
+        for sym, trade in trades.items():
+            try:
+                pos = self.client.get_position(sym)
+            except BybitAPIError:
+                continue
+            if pos is None:
+                continue
+            roi = roi_pct(pos["unrealized_pnl"], trade["margin"])
+            if best is None or roi > best[2]:
+                best = (sym, trade, roi)
+        return (best[0], best[1]) if best else None
+
+    def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
         if not already_closed:
             try:
-                close_qty = self.client.round_qty(self.symbol, trade["qty"])
-                self.client.close_position(self.symbol, trade["side"], close_qty)
+                close_qty = self.client.round_qty(symbol, trade["qty"])
+                self.client.close_position(symbol, trade["side"], close_qty)
             except BybitAPIError as exc:
-                logger.error("aggressive_btc: failed to close %s: %s", self.symbol, exc)
+                logger.error("aggressive_btc: failed to close %s: %s", symbol, exc)
                 return
 
-        closed = self.client.get_closed_pnl(self.symbol)
+        closed = self.client.get_closed_pnl(symbol)
         if closed and closed["updated_time_ms"] / 1000.0 >= trade["opened_at"]:
             pnl = closed["closed_pnl"]
             pnl_is_estimate = False
         else:
             try:
-                exit_price = self.client.get_last_price(self.symbol)
+                exit_price = self.client.get_last_price(symbol)
             except BybitAPIError:
                 exit_price = trade["entry_price"]
             if trade["side"] == "long":
@@ -759,18 +847,18 @@ class AggressiveBTCStrategy:
                 pnl = (trade["entry_price"] - exit_price) * trade["qty"]
             pnl_is_estimate = True
 
-        self.state.set_trade(self.symbol, None)
+        self.state.set_trade(symbol, None)
         self.state.record_closed_trade({
-            "symbol": self.symbol, "side": trade["side"], "entry_price": trade["entry_price"],
+            "symbol": symbol, "side": trade["side"], "entry_price": trade["entry_price"],
             "qty": trade["qty"], "pnl": pnl, "reason": reason, "pnl_is_estimate": pnl_is_estimate,
             "leverage": trade["leverage"], "margin": trade["margin"], "closed_at": time.time(),
         })
         est_tag = " (est.)" if pnl_is_estimate else ""
-        msg = f"[aggressive_btc 종료:{reason}] {self.symbol} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
+        msg = f"[aggressive_btc 종료:{reason}] {symbol} {trade['side'].upper()} PnL={pnl:+.4f} USDT{est_tag}"
         logger.info(msg)
         self.notifier.send(msg)
         try:
-            log_decision(self.log_dir, {"event": "exit", "symbol": self.symbol, "side": trade["side"],
+            log_decision(self.log_dir, {"event": "exit", "symbol": symbol, "side": trade["side"],
                                          "reason": reason, "pnl": pnl, "pnl_is_estimate": pnl_is_estimate})
         except Exception:
             logger.exception("aggressive_btc: failed to log exit decision")

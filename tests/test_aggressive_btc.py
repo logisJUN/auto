@@ -717,6 +717,91 @@ def test_manage_open_position_keeps_a_profitable_trade_open_past_the_hour(tmp_pa
     assert trade["last_hour_checked"] == 1
 
 
+# -- breakeven stop (BREAKEVEN_STOP_AFTER_HOURS) ---------------------------------------------------------
+
+def test_manage_open_position_closes_at_breakeven_stop_after_2h_once_profit_is_given_back(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 2.5 * 3600, "last_hour_checked": 0,
+        "was_profitable": True,  # was ahead at some point
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -0.5, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,  # retraced to ~breakeven
+    }
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 99.0
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_called_once()
+    assert state.get_trade(SYMBOL) is None
+    history = state.snapshot()["history"]
+    assert history[-1]["reason"] == "breakeven_stop"
+
+
+def test_manage_open_position_does_not_breakeven_stop_before_2_hours(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 1.5 * 3600, "last_hour_checked": 1,  # hour-1 mark already handled
+        "was_profitable": True,
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -0.5, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
+    }
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is not None
+
+
+def test_manage_open_position_does_not_breakeven_stop_a_position_that_was_never_profitable(tmp_path):
+    # A plain loser (never went positive) past 2h is HOURLY_CUTOFF_PCT's job,
+    # not breakeven_stop's -- was_profitable absent means it never qualifies.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 2.5 * 3600, "last_hour_checked": 2,  # hour-2 mark already handled
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -1.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
+    }
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is not None
+
+
+def test_manage_open_position_marks_was_profitable_once_roi_turns_positive(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 110.0,
+        "opened_at": time.time() - 0.5 * 3600, "last_hour_checked": 0,
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": 3.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 110.0,
+    }
+
+    strategy.manage_open_position()
+
+    client.close_position.assert_not_called()
+    trade = state.get_trade(SYMBOL)
+    assert trade is not None
+    assert trade["was_profitable"] is True
+
+
 def test_manage_open_position_settles_when_sl_tp_already_closed_it(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_trade(SYMBOL, {
@@ -750,13 +835,32 @@ def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     client.get_klines.assert_not_called()
 
 
-def test_try_enter_skips_when_both_long_and_short_are_already_open_elsewhere(tmp_path):
-    # Capacity cap: at most one long AND one short across all configured
-    # symbols (see module docstring) -- this strategy's own symbol (SOXLUSDT)
-    # is flat, but two OTHER symbols already occupy both sides, so capacity
-    # is full no matter what direction this symbol's own signal is --  it
-    # must not even check its own signal.
+def test_try_enter_skips_when_its_own_direction_matches_an_already_open_side(tmp_path):
+    # Only ONE side (long) is occupied -- this symbol must still compute its
+    # own signal (to know its direction), and is blocked only because its
+    # direction (long) happens to match the already-occupied side (the
+    # rotation rule below is specifically for when BOTH sides are taken).
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    state.set_trade("AAPLUSDT", {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": time.time(), "last_hour_checked": 0,
+    })
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    client.close_position.assert_not_called()  # no rotation -- only one side occupied
+    skip = state.get_skip_reason(SYMBOL)
+    assert skip is not None
+    assert "long 방향 포지션이 이미 다른 종목에 있음" in skip["reason"]
+
+
+# -- capacity rotation (both sides full) ---------------------------------------------------------
+
+def _two_open_trades(state):
     state.set_trade("AAPLUSDT", {
         "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
         "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
@@ -768,32 +872,83 @@ def test_try_enter_skips_when_both_long_and_short_are_already_open_elsewhere(tmp
         "opened_at": time.time(), "last_hour_checked": 0,
     })
 
-    strategy.try_enter()
 
-    client.get_klines.assert_not_called()
-    skip = state.get_skip_reason(SYMBOL)
-    assert skip is not None
-    assert "방향당 1개 제한" in skip["reason"]
-
-
-def test_try_enter_skips_when_its_own_direction_matches_an_already_open_side(tmp_path):
-    # Only ONE side (long) is occupied -- this symbol must still compute its
-    # own signal (to know its direction), and is blocked only because its
-    # direction (long) happens to match the already-occupied side.
+def test_try_enter_rotates_out_the_best_performer_when_capacity_full_and_side_matches(tmp_path):
+    # Both sides full. AAPLUSDT (long) is up +10%, TSLAUSDT (short) is down
+    # -5% -- AAPLUSDT is the better performer (least to lose by closing it),
+    # so it should be the one rotated out, freeing the LONG side for this
+    # symbol's confirmed long signal.
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
-    state.set_trade("AAPLUSDT", {
-        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
-        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
-        "opened_at": time.time(), "last_hour_checked": 0,
-    })
+    strategy._pending_entry = {"direction": "long"}
+    _two_open_trades(state)
+
+    def fake_get_position(sym):
+        if sym == "AAPLUSDT":
+            return {"symbol": sym, "side": "Buy", "size": 1.0, "entry_price": 200.0,
+                    "unrealized_pnl": 5.0, "position_idx": 0, "stop_loss": 190.0, "take_profit": 210.0}  # +10% ROI
+        if sym == "TSLAUSDT":
+            return {"symbol": sym, "side": "Sell", "size": 1.0, "entry_price": 300.0,
+                    "unrealized_pnl": -2.5, "position_idx": 0, "stop_loss": 310.0, "take_profit": 290.0}  # -5% ROI
+        return {"symbol": sym, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+                "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0}
+
+    client.get_position.side_effect = fake_get_position
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 200.0
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.open_position.return_value = {}
 
     strategy.try_enter()
 
-    client.open_position.assert_not_called()
+    # AAPLUSDT (best performer) got rotated out, not TSLAUSDT.
+    client.close_position.assert_called_once()
+    assert client.close_position.call_args[0][0] == "AAPLUSDT"
+    assert state.get_trade("AAPLUSDT") is None
+    assert state.get_trade("TSLAUSDT") is not None  # untouched
+    history = state.snapshot()["history"]
+    assert history[-1]["symbol"] == "AAPLUSDT"
+    assert history[-1]["reason"] == "rotated_out"
+
+    # Freed the long side -- this symbol's confirmed long signal entered.
+    client.open_position.assert_called_once()
+    assert state.get_trade(SYMBOL) is not None
+
+
+def test_try_enter_rotation_closes_best_performer_but_still_skips_if_side_still_mismatched(tmp_path):
+    # Both sides full. This symbol wants SHORT, but the better performer
+    # (least to lose) happens to be the LONG position (AAPLUSDT) -- rotating
+    # it out does NOT free the short side TSLAUSDT already holds, so this
+    # symbol still can't enter this tick even though a rotation happened.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "short"}
+    _two_open_trades(state)
+
+    def fake_get_position(sym):
+        if sym == "AAPLUSDT":  # long, best performer
+            return {"symbol": sym, "side": "Buy", "size": 1.0, "entry_price": 200.0,
+                    "unrealized_pnl": 5.0, "position_idx": 0, "stop_loss": 190.0, "take_profit": 210.0}
+        if sym == "TSLAUSDT":  # short, worse performer -- stays open
+            return {"symbol": sym, "side": "Sell", "size": 1.0, "entry_price": 300.0,
+                    "unrealized_pnl": -2.5, "position_idx": 0, "stop_loss": 310.0, "take_profit": 290.0}
+        return None
+
+    client.get_position.side_effect = fake_get_position
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 200.0
+
+    strategy.try_enter()
+
+    client.close_position.assert_called_once_with("AAPLUSDT", "long", 1.0)
+    assert state.get_trade("AAPLUSDT") is None
+    assert state.get_trade("TSLAUSDT") is not None  # short side still occupied
+
+    client.open_position.assert_not_called()  # still blocked -- wrong side was freed
     skip = state.get_skip_reason(SYMBOL)
     assert skip is not None
-    assert "long 방향 포지션이 이미 다른 종목에 있음" in skip["reason"]
+    assert "방향이 맞지 않음" in skip["reason"]
 
 
 def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_path):
