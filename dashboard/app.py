@@ -132,7 +132,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
     return out
 
 
-def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
+def _build_aggressive_btc_views(client: BybitClient, perf_by_symbol: dict) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
     (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 38 stock tokens) --
     empty list if that module has never run (no state file yet), so this
@@ -145,10 +145,23 @@ def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     for -- true once aggressive_btc is flipped to live (it then shares the
     main bot's live account).
 
-    Only symbols that show up in history/trades/skip_reasons, OR are in the
-    currently configured list, are included -- a symbol aggressive_btc's own
-    startup validation dropped (an invalid/delisted ticker, see that
-    module's docstring) simply won't appear here either.
+    `perf_by_symbol` is compute_performance_summary(log_dir)["by_symbol"] --
+    cumulative_pnl/trade_count are sourced from THIS (decisions.jsonl-based),
+    not from this state file's own "history" list. Observed live: a Render
+    redeploy resets state.json's "history" back to empty (no persistent disk
+    on the free plan -- see module docstring) even when real trades already
+    closed, showing "누적손익(로컬) 0.0000" next to a nonzero
+    "거래소손익(7일)" for the very same symbol. decisions.jsonl isn't
+    immune to the same reset, but in practice it's the log that's already
+    relied on for "성과 리뷰" above, so reusing it here keeps the two
+    sections showing the same number for the same symbol instead of
+    silently disagreeing. state.json's own "history" is still consulted for
+    the per-trade detail table.
+
+    Only symbols with an open position, a recorded trade, or a skip reason
+    are included -- a symbol aggressive_btc's own startup validation
+    dropped (an invalid/delisted ticker, see that module's docstring)
+    simply won't appear here either.
     """
     path = aggressive_btc.state_path()
     if not os.path.exists(path):
@@ -192,27 +205,28 @@ def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
                 "time_str": _kst_str(t.get("closed_at", time.time())),
             })
 
-        cumulative_pnl = sum(t.get("pnl", 0.0) for t in symbol_history_all)
+        symbol_perf = perf_by_symbol.get(symbol, {"count": 0, "total_pnl": 0.0})
+        cumulative_pnl = symbol_perf["total_pnl"]
+        trade_count = symbol_perf["count"]
         skip = all_skips.get(symbol)
 
-        if position is None and not symbol_history_all and skip is None:
+        if position is None and trade_count == 0 and skip is None:
             # Never traded, no skip reason recorded yet -- most likely still
             # mid-warmup right after a redeploy. Skipping it here (rather
-            # than rendering an empty card for all 11 symbols immediately)
-            # keeps the page from being dominated by 10 blank stock cards on
-            # a fresh start; it appears as soon as it has ANY data.
+            # than rendering an empty card for all 39 symbols immediately)
+            # keeps the page from being dominated by blank stock rows on a
+            # fresh start; it appears as soon as it has ANY data.
             continue
 
-        # Render's free plan has no persistent disk -- a redeploy wipes this
-        # state file, silently resetting cumulative_pnl/trade_count above to
-        # 0 even though real trades already closed on the exchange (observed
-        # live: a -0.24 USDT loss vanished from this dashboard after a
-        # same-day redeploy). Cross-check against Bybit's own closed-pnl
-        # ledger for the last 7 days (its query window per call), cached per
-        # symbol, so a real loss/gain total is visible even when the
-        # itemized local history was just wiped. This doesn't attempt to
-        # reconstruct the itemized table above -- leverage/reason ("sl_tp_hit"
-        # vs "hourly_cutoff") are this module's own judgment calls, not
+        # Render's free plan has no persistent disk -- a redeploy wipes
+        # state AND decisions.jsonl alike, so cumulative_pnl/trade_count
+        # above can still read 0 for a symbol that traded before the most
+        # recent restart. Cross-check against Bybit's own closed-pnl ledger
+        # for the last 7 days (its query window per call), cached per
+        # symbol, so a real loss/gain total is visible even when every local
+        # log was just wiped. This doesn't attempt to reconstruct the
+        # itemized table above -- leverage/reason ("sl_tp_hit" vs
+        # "hourly_cutoff") are this module's own judgment calls, not
         # something the exchange record carries.
         cache_entry = _agg_exchange_pnl_cache.setdefault(symbol, {"ts": 0.0, "value": None})
         if now - cache_entry["ts"] > _AGG_EXCHANGE_PNL_CACHE_TTL_SEC:
@@ -226,7 +240,7 @@ def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
                 pass  # keep serving the last good value, if any
 
         views.append({"position": position, "history": history, "cumulative_pnl": cumulative_pnl,
-                      "trade_count": len(symbol_history_all),
+                      "trade_count": trade_count,
                       "skip_reason": skip.get("reason") if skip else None,
                       "symbol": symbol,
                       "exchange_pnl_7d": cache_entry["value"]})
@@ -532,6 +546,10 @@ TEMPLATE = """
   {% if aggressive_list %}
   <div class="card">
     <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
+    <div class="grid" style="margin-bottom:10px;">
+      <div><div class="stat-label">누적손익(로컬) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
+      <div><div class="stat-label">거래소손익(7일) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.exchange_pnl_7d >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.exchange_pnl_7d) }}</div></div>
+    </div>
     <table>
       <tr><th>심볼</th><th>상태</th><th>누적손익(로컬)</th><th>거래소손익(7일)</th><th>거래수</th><th></th></tr>
       {% for agg in aggressive_list %}
@@ -1084,7 +1102,11 @@ def index():
 
     stress = _get_stress_test(equity, snapshot.get("trades", {})) if (equity > 0 and main_bot_enabled) else None
     perf = compute_performance_summary(log_dir)
-    aggressive_list = _build_aggressive_btc_views(client)
+    aggressive_list = _build_aggressive_btc_views(client, perf["by_symbol"])
+    aggressive_totals = {
+        "cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list),
+        "exchange_pnl_7d": sum(a["exchange_pnl_7d"] for a in aggressive_list if a["exchange_pnl_7d"] is not None),
+    }
 
     return render_template_string(
         TEMPLATE,
@@ -1108,6 +1130,7 @@ def index():
         stress=stress,
         perf=perf,
         aggressive_list=aggressive_list,
+        aggressive_totals=aggressive_totals,
     )
 
 
