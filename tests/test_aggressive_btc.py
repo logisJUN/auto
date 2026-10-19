@@ -10,6 +10,8 @@ another symbol.
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 import bot.aggressive_btc as aggressive_btc
 from bot.aggressive_btc import (
     SYMBOL,
@@ -843,3 +845,99 @@ def test_resolve_credentials_refuses_testnet_without_dedicated_keys(monkeypatch)
     monkeypatch.delenv("AGGRESSIVE_BTC_TESTNET_API_KEY", raising=False)
     monkeypatch.delenv("AGGRESSIVE_BTC_TESTNET_API_SECRET", raising=False)
     assert _resolve_credentials(_SECRETS) is None
+
+
+# -- _reconcile_orphaned_positions ---------------------------------------------------------
+# A position can be open on the exchange with no corresponding entry in the
+# shared local state -- e.g. aggressive_btc_state.json was wiped by a Render
+# redeploy (no persistent disk on the free plan; this module pushes new
+# commits often). Without this, tick() would route that symbol through
+# try_enter() instead of manage_open_position() (no hourly-cutoff
+# management), and the long/short capacity cap would no longer see it as
+# occupying its side. Only a position with BOTH SL and TP already set gets
+# adopted -- try_enter() always attaches both (or force-closes immediately
+# if it can't), so that's the reliable signal this is a real restart-
+# recovery case rather than a manually-opened position to leave alone.
+from bot.aggressive_btc import _reconcile_orphaned_positions  # noqa: E402
+
+
+def _orphan(symbol, side="Buy", size=2.0, entry_price=50.0, stop_loss=0, take_profit=0, leverage=10.0):
+    return {"symbol": symbol, "side": side, "size": size, "entry_price": entry_price,
+            "unrealized_pnl": 0.0, "position_idx": 0,
+            "stop_loss": stop_loss, "take_profit": take_profit, "leverage": leverage}
+
+
+def _make_reconcile_env(tmp_path):
+    state = StateStore(str(tmp_path / "aggressive_btc_state.json"))
+    notifier = Notifier(None, None)
+    client = MagicMock(spec=BybitClient)
+    log_dir = str(tmp_path / "logs")
+    configs_by_symbol = {sc.symbol: sc for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
+    return client, state, notifier, log_dir, configs_by_symbol
+
+
+def test_reconcile_adopts_an_orphaned_position_with_sl_tp_already_set(tmp_path):
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    client.get_all_open_positions.return_value = [
+        _orphan("DJTUSDT", side="Sell", size=9.2, entry_price=6.931, stop_loss=6.980, take_profit=6.901, leverage=15.0)
+    ]
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    trade = state.get_trade("DJTUSDT")
+    assert trade is not None
+    assert trade["side"] == "short"
+    assert trade["qty"] == 9.2
+    assert trade["entry_price"] == 6.931
+    assert trade["current_sl"] == 6.980
+    assert trade["current_tp"] == 6.901
+    assert trade["leverage"] == 15.0
+    assert trade["margin"] == pytest.approx(9.2 * 6.931 / 15.0)
+
+
+def test_reconcile_leaves_a_position_without_sl_tp_alone_as_presumably_manual(tmp_path):
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    notifier.send = MagicMock()
+    client.get_all_open_positions.return_value = [_orphan("AAPLUSDT")]  # no SL/TP
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    assert state.get_trade("AAPLUSDT") is None
+    notifier.send.assert_not_called()
+
+
+def test_reconcile_skips_a_symbol_already_tracked_locally(tmp_path):
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    existing = {
+        "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
+        "opened_at": 123.0, "last_hour_checked": 0,
+    }
+    state.set_trade("AAPLUSDT", existing)
+    client.get_all_open_positions.return_value = [
+        _orphan("AAPLUSDT", stop_loss=195.0, take_profit=220.0)  # different values -- must NOT overwrite
+    ]
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    assert state.get_trade("AAPLUSDT")["opened_at"] == 123.0
+    assert state.get_trade("AAPLUSDT")["current_sl"] == 190.0
+
+
+def test_reconcile_ignores_a_symbol_not_in_the_configured_aggressive_btc_set(tmp_path):
+    # BTCUSDT belongs to the main bot, not aggressive_btc -- must not be adopted here.
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    client.get_all_open_positions.return_value = [_orphan("BTCUSDT", stop_loss=90.0, take_profit=110.0)]
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    assert state.get_trade("BTCUSDT") is None
+
+
+def test_reconcile_tolerates_the_exchange_call_failing(tmp_path):
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    client.get_all_open_positions.side_effect = BybitAPIError("network error")
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)  # must not raise
+
+    assert state.snapshot()["trades"] == {}

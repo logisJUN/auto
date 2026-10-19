@@ -646,6 +646,13 @@ def _decision_summary(d: dict) -> str:
         return f"{d.get('score', 0.0):+.2f}"
     if event == "started":
         return f"{d.get('symbol')} 프로세스 시작됨 ({d.get('mode')})"
+    if event == "position_adopted":
+        # Logged by _reconcile_orphaned_positions when local state was wiped
+        # (e.g. a Render redeploy) but the position is still genuinely open
+        # on the exchange -- re-registered for management rather than left
+        # untracked.
+        return (f"{d.get('symbol')} {str(d.get('side', '')).upper()} entry={d.get('entry_price')} "
+                f"SL={d.get('sl')} TP={d.get('tp')} (로컬 기록 유실 후 재등록됨)")
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 

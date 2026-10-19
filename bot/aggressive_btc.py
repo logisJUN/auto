@@ -776,6 +776,79 @@ class AggressiveBTCStrategy:
             self.try_enter()
 
 
+def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifier: Notifier,
+                                   log_dir: str, configs_by_symbol: dict[str, SymbolConfig]):
+    """Finds any position that's actually open on the exchange, for one of
+    AGGRESSIVE_CONFIGS' symbols, but isn't in the shared local state -- most
+    likely because a Render redeploy wiped aggressive_btc_state.json (no
+    persistent disk on the free plan; this module pushes new commits often,
+    each one a redeploy) -- and adopts it. Without this, an orphaned
+    position sits invisible to both the dashboard AND this module's own
+    tick() (which decides try_enter() vs manage_open_position() purely from
+    local state): no hourly-cutoff management, and the long/short capacity
+    cap in try_enter() no longer sees it as occupying its side, risking a
+    duplicate or over-capacity entry on top of it.
+
+    Only adopts a position that ALREADY has both SL and TP set on the
+    exchange -- same rule and same reasoning as the main bot's
+    Strategy._reconcile_orphaned_positions: a bot-opened position always has
+    both attached at entry (or gets force-closed immediately if attaching
+    fails -- see try_enter()), so "has SL/TP" reliably signals this is a
+    real restart-recovery case rather than a manually-opened position that
+    should be left alone.
+
+    Called once per main-loop iteration (not per-strategy) since
+    get_all_open_positions() already returns the whole account in one call.
+
+    The real opened_at/leverage/margin this position was originally sized
+    with are lost along with the rest of local state -- opened_at is
+    approximated as "now" (restarts its hourly-cutoff clock; the only
+    practical alternative), leverage comes from the exchange's own position
+    data (now included in get_all_open_positions()), and margin is
+    back-computed from notional/leverage.
+    """
+    try:
+        open_positions = client.get_all_open_positions()
+    except BybitAPIError:
+        logger.exception("aggressive_btc: failed to reconcile open positions against local state")
+        return
+
+    tracked = set(state.snapshot().get("trades", {}).keys())
+    for pos in open_positions:
+        symbol = pos["symbol"]
+        cfg = configs_by_symbol.get(symbol)
+        if cfg is None or symbol in tracked:
+            continue
+
+        if pos["stop_loss"] <= 0 or pos["take_profit"] <= 0:
+            logger.info("aggressive_btc: found an open %s position with no SL/TP and not tracked locally -- "
+                        "treating as manually opened, leaving it alone", symbol)
+            continue
+
+        logger.warning("aggressive_btc: found an open %s position not tracked locally -- adopting it", symbol)
+        side = "long" if pos["side"] == "Buy" else "short"
+        leverage = pos.get("leverage") or cfg.min_leverage
+        notional = pos["size"] * pos["entry_price"]
+        margin = notional / leverage if leverage > 0 else notional
+
+        trade = {
+            "symbol": symbol, "side": side, "entry_price": pos["entry_price"], "qty": pos["size"],
+            "margin": margin, "leverage": leverage, "current_sl": pos["stop_loss"], "current_tp": pos["take_profit"],
+            "opened_at": time.time(), "last_hour_checked": 0,
+        }
+        state.set_trade(symbol, trade)
+        notifier.send(
+            f"[알림] aggressive_btc: 추적 안 되던 {symbol} 포지션을 찾아 관리 대상으로 등록했습니다 "
+            f"(SL={trade['current_sl']:.4f} TP={trade['current_tp']:.4f})."
+        )
+        try:
+            log_decision(log_dir, {"event": "position_adopted", "symbol": symbol, "side": side,
+                                    "entry_price": pos["entry_price"], "qty": pos["size"],
+                                    "sl": trade["current_sl"], "tp": trade["current_tp"]})
+        except Exception:
+            logger.exception("aggressive_btc: failed to log position_adopted decision")
+
+
 def _resolve_credentials(secrets: Secrets) -> tuple[str, str] | None:
     """Bybit testnet and live are separate accounts with separate API keys --
     a live-account key will NOT authenticate against the testnet host. Going
@@ -865,6 +938,7 @@ def main():
             news_cache[news_key] = NewsSignal(symbol_cfg.news_cfg, secrets.newsapi_key)
         strategies.append(AggressiveBTCStrategy(client, state, notifier, poly_cache[poly_key], news_cache[news_key],
                                                  symbol_cfg, log_dir))
+    configs_by_symbol = {sc.symbol: sc for sc in valid_configs}
 
     active_symbols_desc = ", ".join(sc.symbol for sc in valid_configs)
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {active_symbols_desc}")
@@ -880,6 +954,7 @@ def main():
 
     while True:
         loop_start = time.time()
+        _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
         for strategy in strategies:
             try:
                 strategy.tick()
