@@ -381,8 +381,9 @@ TEMPLATE = """
   </div>
   {% endif %}
 
+  {% if positions or exchange_query_error %}
   <div class="card">
-    <h2 style="font-size:1rem;">열린 포지션</h2>
+    <h2 style="font-size:1rem;">열린 포지션 (메인 봇 / 수동 전용 -- aggressive_btc는 아래 ⚡ 표 참고)</h2>
     {% if exchange_query_error %}
     <div class="small pnl-neg" style="margin-bottom:6px;">
       ⚠️ 거래소 포지션 조회 실패 ({{ exchange_query_error }}) -- "수동" 포지션 목록이 비어있어도 실제로는 없는 게 아니라
@@ -409,10 +410,9 @@ TEMPLATE = """
     {% if positions|selectattr('manual')|list %}
     <div class="small" style="margin-top:6px;">(수동) = 봇이 추적하지 않는, 거래소에서 직접 연 포지션입니다. 조회만 하고 자동으로 관리/청산하지 않습니다.</div>
     {% endif %}
-    {% else %}
-    <div class="small">현재 열린 포지션 없음 - 진입 신호 대기 중</div>
     {% endif %}
   </div>
+  {% endif %}
 
   {% if equity_curve %}
   <div class="card">
@@ -432,9 +432,9 @@ TEMPLATE = """
   </div>
   {% endif %}
 
+  {% if trade_history %}
   <div class="card">
-    <h2 style="font-size:1rem;">거래 이력</h2>
-    {% if trade_history %}
+    <h2 style="font-size:1rem;">거래 이력 (메인 봇 전용 -- aggressive_btc 이력은 아래 ⚡ 표의 백테스트/로그 참고)</h2>
     <table>
       <tr><th>시각</th><th>심볼</th><th>방향</th><th>진입가</th><th>청산가</th><th>수량</th><th>진입 USDT</th><th>손익</th><th>손익%</th><th>수수료</th><th>사유</th></tr>
       {% for t in trade_history %}
@@ -453,10 +453,8 @@ TEMPLATE = """
       </tr>
       {% endfor %}
     </table>
-    {% else %}
-    <div class="small">아직 청산된 거래가 없습니다.</div>
-    {% endif %}
   </div>
+  {% endif %}
 
   {% if stress %}
   <div class="card">
