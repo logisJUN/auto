@@ -20,4 +20,4 @@ strategy logic. Currently just the one: ENTRY_THRESHOLD.
 # 29% -> 17% across successive days) as weaker signals were traded more
 # often -- trading less often on higher-conviction signals should raise win
 # rate back up, at the cost of fewer trades/slower compounding.
-ENTRY_THRESHOLD = 0.3
+ENTRY_THRESHOLD = 0.25
