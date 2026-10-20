@@ -267,6 +267,21 @@ def test_get_signal_wires_news_signal_into_the_blend(tmp_path, monkeypatch):
     assert round(signal["score"], 3) == -0.60
 
 
+def test_get_signal_includes_recent_extension_for_the_chase_filter(tmp_path, monkeypatch):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    client.get_klines.return_value = [{"ts": 1, "open": 1, "high": 1, "low": 1,
+                                        "close": 100.0, "volume": 1}]
+    monkeypatch.setattr(aggressive_btc.technical, "score_timeframe",
+                         lambda candles, cfg: {"score": 0.5, "atr": 1.0, "close": 100.0})
+    monkeypatch.setattr(aggressive_btc.technical, "volume_score", lambda candles: 0.0)
+    monkeypatch.setattr(aggressive_btc.technical, "recent_extension",
+                         lambda candles, atr, lookback=6: 2.5)
+
+    signal = strategy.get_signal()
+
+    assert signal["recent_extension_atr_mult"] == 2.5
+
+
 def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
@@ -492,6 +507,133 @@ def test_try_enter_skips_when_signal_is_neutral(tmp_path):
     assert len(checks) == 1
     assert checks[0]["direction"] == "neutral"
     assert checks[0]["signal"]["components"]["technical"]["score"] == 0.1
+
+
+# -- minimum volatility floor (MIN_VOLATILITY_ATR_PCT) ---------------------------------------------------------
+
+def test_try_enter_skips_when_volatility_is_below_the_floor(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "long", "score": 0.8, "atr": 0.1, "close": 140.0,  # atr_pct ~0.07%, below the 0.15% floor
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
+    assert reason is not None
+    assert "변동성 부족" in reason["reason"]
+
+
+def test_try_enter_clears_pending_confirmation_when_volatility_drops_below_the_floor(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy._pending_entry = {"direction": "long", "count": 2}  # was mid-confirmation
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 0.1, "close": 140.0}
+
+    strategy.try_enter()
+
+    assert strategy._pending_entry is None
+
+
+def test_try_enter_proceeds_when_volatility_is_at_the_floor(tmp_path):
+    # Exactly at MIN_VOLATILITY_ATR_PCT (0.15%) must still be allowed -- only
+    # strictly below the floor is blocked.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 0.21, "close": 140.0}  # 0.15% exactly
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
+
+
+# -- chase-entry filter (MAX_ENTRY_CHASE_ATR_MULT) ---------------------------------------------------------
+
+def test_try_enter_skips_a_confirmed_long_that_is_chasing_an_already_extended_move(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0,
+        "recent_extension_atr_mult": 4.0,  # > MAX_ENTRY_CHASE_ATR_MULT (3.0) -- already extended up
+    }
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
+    assert reason is not None
+    assert "추격 방지" in reason["reason"]
+
+
+def test_try_enter_skips_a_confirmed_short_that_is_chasing_an_already_extended_drop(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0,
+        "recent_extension_atr_mult": -4.0,  # < -MAX_ENTRY_CHASE_ATR_MULT -- already extended down
+    }
+    strategy._pending_entry = {"direction": "short"}
+
+    strategy.try_enter()
+
+    client.open_position.assert_not_called()
+    reason = state.get_skip_reason(SYMBOL)
+    assert reason is not None
+    assert "추격 방지" in reason["reason"]
+
+
+def test_try_enter_allows_entry_when_extension_is_within_the_chase_limit(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0,
+        "recent_extension_atr_mult": 1.0,  # well within the limit
+    }
+    strategy._pending_entry = {"direction": "long"}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
+
+
+def test_try_enter_allows_entry_when_extension_is_opposite_the_entry_direction(tmp_path):
+    # A short entered right after a large UP move isn't "chasing" -- it's a
+    # reversal call, not a continuation -- so a strongly positive extension
+    # must not block a short (only a strongly NEGATIVE one would).
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {
+        "direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0,
+        "recent_extension_atr_mult": 4.0,  # extended UP, but this is a SHORT -- opposite direction
+    }
+    strategy._pending_entry = {"direction": "short"}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Sell", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 150.0, "take_profit": 123.2,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
 
 
 def test_signal_check_logging_is_throttled(tmp_path):

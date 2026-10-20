@@ -126,11 +126,24 @@ Design, as specified (per symbol, via SymbolConfig):
   9. Per-symbol consecutive-loss cooldown: every close (any reason) is scored
      win/loss by realized pnl via state.record_symbol_result(); after
      SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES straight losses, that symbol alone
-     is blocked from new entries for SYMBOL_PAUSE_DURATION_MIN (ported from
-     the main bot's Strategy, which uses the same state.py mechanism --
-     motivated by ANETUSDT losing 3 straight times live while every other
-     symbol traded fine on the same signal logic over the same period, the
-     same pattern that led the main bot to add this in the first place).
+     is blocked from new entries for SYMBOL_PAUSE_DURATION_MIN -- motivated
+     by ANETUSDT losing 3 straight times live while every other symbol
+     traded fine on the same signal logic over the same period.
+  10. Chase-entry filter: a confirmed signal is still skipped if price has
+      already moved MAX_ENTRY_CHASE_ATR_MULT+ ATR multiples (over
+      CHASE_LOOKBACK_CANDLES candles) in the SAME direction -- every
+      technical sub-score plus volume_score reads a big, fast recent move as
+      strong confirmation, with no way to tell a fresh breakout apart from
+      an already-exhausted spike about to pull back. Checked after entry
+      confirmation (3 above) but before capacity rotation, so a chasing
+      signal can't even bump out a real position to take its place.
+  11. Minimum volatility floor: entries are skipped entirely when the 1h ATR
+      is below MIN_VOLATILITY_ATR_PCT of price -- a dead/chopping market
+      where the likely move is mostly noise. Particularly important given
+      compute_leverage()'s behavior in this exact regime: low ATR% pushes
+      leverage UP (toward max_leverage/leverage_hard_cap, to still reach the
+      ROI target), so without this floor the lowest-conviction regime would
+      also end up the highest-leverage one.
 
 ================================================================================
 TESTNET below is the ONLY thing that needs to change to go live. Defaults to
@@ -217,6 +230,23 @@ SYMBOL_PAUSE_DURATION_MIN = 360  # 6 hours
 # evicted to make room for a different symbol.
 ROTATION_MIN_HOLD_MINUTES = 10
 ROTATION_MIN_HOLD_SEC = ROTATION_MIN_HOLD_MINUTES * 60
+# Skip a confirmed entry if price has already moved this many ATR multiples
+# (over CHASE_LOOKBACK_CANDLES candles) in the SAME direction as the
+# candidate -- every technical sub-score (trend/momentum/MACD/Bollinger)
+# plus volume_score reads a big, fast recent move as strong directional
+# confirmation, with no way to tell a fresh breakout apart from an
+# already-exhausted spike that's about to pull back. Measured via
+# technical.recent_extension(). 0 would disable this check entirely.
+MAX_ENTRY_CHASE_ATR_MULT = 3.0
+CHASE_LOOKBACK_CANDLES = 6
+# Skip entries entirely when the 1h ATR is below this % of price -- a
+# dead/chopping market where the likely move is mostly noise rather than a
+# real directional signal. Particularly important here because
+# compute_leverage() does the OPPOSITE of what intuition suggests it
+# should in this regime: low ATR% pushes leverage UP (toward max_leverage/
+# leverage_hard_cap, to still reach the ROI target), so without this floor
+# the lowest-conviction regime would also be the highest-leverage one.
+MIN_VOLATILITY_ATR_PCT = 0.15
 POLL_SEC = 30
 MIN_ORDER_NOTIONAL_USDT = 5.0
 # Logging every 30s tick's signal to decisions.jsonl would mostly be
@@ -591,10 +621,15 @@ class AggressiveBTCStrategy:
         vol_score = technical.volume_score(candles)
         poly_result = self.poly_signal.score(self.symbol)
         news_result = self.news_signal.score_for_symbol(self.symbol)
-        return compute_signal(tech_result, vol_score, poly_result, news_result,
-                               tech_weight=self.cfg.tech_weight, volume_weight=self.cfg.volume_weight,
-                               poly_weight=self.cfg.poly_weight, news_weight=self.cfg.news_weight,
-                               entry_threshold=self.cfg.min_confidence_to_enter)
+        signal = compute_signal(tech_result, vol_score, poly_result, news_result,
+                                 tech_weight=self.cfg.tech_weight, volume_weight=self.cfg.volume_weight,
+                                 poly_weight=self.cfg.poly_weight, news_weight=self.cfg.news_weight,
+                                 entry_threshold=self.cfg.min_confidence_to_enter)
+        # See MAX_ENTRY_CHASE_ATR_MULT -- how far (in ATR multiples, signed)
+        # price has already moved over the last CHASE_LOOKBACK_CANDLES.
+        signal["recent_extension_atr_mult"] = technical.recent_extension(
+            candles, tech_result.get("atr", 0.0), lookback=CHASE_LOOKBACK_CANDLES)
+        return signal
 
     # -- entry ---------------------------------------------------------
     def _format_signal_breakdown(self, signal: dict) -> str:
@@ -665,6 +700,14 @@ class AggressiveBTCStrategy:
         if signal["atr"] <= 0 or signal["close"] <= 0:
             self.state.set_skip_reason(self.symbol, "가격/ATR 데이터 없음")
             return
+
+        atr_pct = signal["atr"] / signal["close"] * 100.0
+        if atr_pct < MIN_VOLATILITY_ATR_PCT:
+            self._pending_entry = None  # a dead market invalidates any pending confirmation too
+            self.state.set_skip_reason(
+                self.symbol, f"변동성 부족 (ATR {atr_pct:.2f}% < 기준 {MIN_VOLATILITY_ATR_PCT:.2f}%)")
+            return
+
         if signal["direction"] == "neutral":
             self._pending_entry = None  # any earlier pending confirmation no longer applies
             self.state.set_skip_reason(
@@ -701,6 +744,21 @@ class AggressiveBTCStrategy:
                              f"유지되면 진입 ({self._format_signal_breakdown(signal)})")
             return
         self._pending_entry = None  # confirmed
+
+        # Chase-entry filter: skip regardless of score if price has already
+        # moved MAX_ENTRY_CHASE_ATR_MULT+ ATR multiples in this SAME
+        # direction over the last CHASE_LOOKBACK_CANDLES -- see
+        # MAX_ENTRY_CHASE_ATR_MULT's module-level comment. Checked after
+        # confirmation (not before) so a chasing signal doesn't even get to
+        # trigger rotation below -- bumping out a real position to chase an
+        # already-exhausted move would be worse than just skipping.
+        extension = signal.get("recent_extension_atr_mult", 0.0)
+        chasing = (direction == "long" and extension > MAX_ENTRY_CHASE_ATR_MULT) or \
+                  (direction == "short" and extension < -MAX_ENTRY_CHASE_ATR_MULT)
+        if chasing:
+            self.state.set_skip_reason(
+                self.symbol, f"최근 급등/급락 추격 방지 (최근 변동 {extension:+.1f}×ATR)")
+            return
 
         # Capacity cap: at most one LONG and one SHORT open at a time across
         # all 39 symbols (see module docstring).
@@ -750,7 +808,6 @@ class AggressiveBTCStrategy:
             self.state.set_skip_reason(self.symbol, "여유 증거금 없음")
             return
 
-        atr_pct = signal["atr"] / signal["close"] * 100.0
         leverage = compute_leverage(atr_pct, target_pct=self.cfg.target_pct,
                                      min_leverage=self.cfg.min_leverage, max_leverage=self.cfg.max_leverage,
                                      hard_cap=self.cfg.leverage_hard_cap)
