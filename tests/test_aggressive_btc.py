@@ -278,7 +278,7 @@ def test_try_enter_opens_a_long_on_a_strong_bullish_signal(tmp_path):
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -305,7 +305,7 @@ def test_try_enter_logs_an_entry_decision_on_success(tmp_path):
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -333,7 +333,7 @@ def test_try_enter_truncates_leverage_to_a_whole_number_before_pricing_tp_sl(tmp
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -359,14 +359,14 @@ def test_try_enter_clears_a_previously_set_skip_reason_on_successful_entry(tmp_p
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
     assert state.get_skip_reason(SYMBOL) is None
 
 
-# -- entry confirmation (2 consecutive same-direction checks) ---------------------------------------------------------
+# -- entry confirmation (ENTRY_CONFIRMATION_TICKS consecutive same-direction checks) ---------------------------------------------------------
 
 def test_try_enter_does_not_enter_on_the_first_tick_a_direction_crosses_threshold(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
@@ -381,11 +381,28 @@ def test_try_enter_does_not_enter_on_the_first_tick_a_direction_crosses_threshol
     assert state.get_trade(SYMBOL) is None
     reason = state.get_skip_reason(SYMBOL)
     assert reason is not None
-    assert "1차 확인됨" in reason["reason"]
-    assert strategy._pending_entry == {"direction": "long"}
+    assert "1/3차 확인됨" in reason["reason"]
+    assert strategy._pending_entry == {"direction": "long", "count": 1}
 
 
-def test_try_enter_enters_on_the_second_consecutive_tick_with_the_same_direction(tmp_path):
+def test_try_enter_does_not_enter_on_the_second_of_three_consecutive_ticks(tmp_path):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+
+    strategy.try_enter()  # 1st tick
+    strategy.try_enter()  # 2nd tick, same direction -- still not enough (needs 3)
+
+    client.open_position.assert_not_called()
+    assert state.get_trade(SYMBOL) is None
+    reason = state.get_skip_reason(SYMBOL)
+    assert "2/3차 확인됨" in reason["reason"]
+    assert strategy._pending_entry == {"direction": "long", "count": 2}
+
+
+def test_try_enter_enters_on_the_third_consecutive_tick_with_the_same_direction(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
     client.get_equity_usdt.return_value = 100.0
@@ -398,7 +415,8 @@ def test_try_enter_enters_on_the_second_consecutive_tick_with_the_same_direction
     }
 
     strategy.try_enter()  # 1st tick -- just registers the pending confirmation
-    strategy.try_enter()  # 2nd tick, same direction -- actually enters
+    strategy.try_enter()  # 2nd tick, same direction -- still pending
+    strategy.try_enter()  # 3rd tick, same direction -- actually enters
 
     client.open_position.assert_called_once()
     trade = state.get_trade(SYMBOL)
@@ -415,13 +433,14 @@ def test_try_enter_restarts_confirmation_if_the_direction_flips(tmp_path):
 
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
     strategy.try_enter()  # 1st tick: pending long
-    assert strategy._pending_entry == {"direction": "long"}
+    strategy.try_enter()  # 2nd tick: pending long, count 2
+    assert strategy._pending_entry == {"direction": "long", "count": 2}
 
     strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
     strategy.try_enter()  # direction flipped -- must NOT enter short immediately
 
     client.open_position.assert_not_called()
-    assert strategy._pending_entry == {"direction": "short"}  # confirmation restarted for the new direction
+    assert strategy._pending_entry == {"direction": "short", "count": 1}  # confirmation restarted for the new direction
 
 
 def test_try_enter_clears_pending_confirmation_once_signal_goes_neutral(tmp_path):
@@ -496,7 +515,7 @@ def test_try_enter_sets_skip_reason_when_no_margin_available(tmp_path):
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
     client.get_equity_usdt.return_value = 100.0
     client.get_available_balance_usdt.return_value = 0.0
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -522,7 +541,7 @@ def test_try_enter_sets_skip_reason_when_order_sizing_fails(tmp_path):
 
     original_compute = agg_mod.compute_qty_fixed_margin
     agg_mod.compute_qty_fixed_margin = lambda **kwargs: FakeSizing()
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
     try:
         strategy.try_enter()
     finally:
@@ -547,7 +566,7 @@ def test_try_enter_bumps_up_to_the_minimum_entry_size_when_50pct_margin_is_too_s
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -565,7 +584,7 @@ def test_try_enter_still_skips_if_even_the_minimum_entry_size_is_unaffordable(tm
     client.get_equity_usdt.return_value = 0.5
     client.get_available_balance_usdt.return_value = 0.1  # not even enough for the minimum
     client.get_last_price.return_value = 140.0
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -587,7 +606,7 @@ def test_try_enter_closes_immediately_if_sl_tp_fails_to_attach(tmp_path):
         "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
         "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 0.0, "take_profit": 0.0,  # never attached
     }
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
 
     strategy.try_enter()
 
@@ -928,7 +947,7 @@ def test_try_enter_skips_when_its_own_direction_matches_an_already_open_side(tmp
     # rotation rule below is specifically for when BOTH sides are taken).
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
-    strategy._pending_entry = {"direction": "long"}  # simulate the confirming 2nd consecutive tick
+    strategy._pending_entry = {"direction": "long"}  # simulate the final confirming tick
     state.set_trade("AAPLUSDT", {
         "symbol": "AAPLUSDT", "side": "long", "entry_price": 200.0, "qty": 1.0,
         "margin": 50.0, "leverage": 10.0, "current_sl": 190.0, "current_tp": 210.0,
@@ -1124,7 +1143,7 @@ def test_try_enter_rotation_only_considers_positions_past_min_hold_time(tmp_path
 def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_path):
     # AAPLUSDT holds the long side -- a short signal on this symbol is the
     # free side, so it must proceed past the capacity check (into the normal
-    # 2-tick confirmation flow, not an immediate entry).
+    # entry-confirmation flow, not an immediate entry).
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     strategy.get_signal = lambda: {"direction": "short", "score": -0.8, "atr": 1.5, "close": 140.0}
     state.set_trade("AAPLUSDT", {
@@ -1138,7 +1157,7 @@ def test_try_enter_allowed_when_its_own_direction_is_the_opposite_free_side(tmp_
     skip = state.get_skip_reason(SYMBOL)
     assert skip is not None
     assert "방향당 1개 제한" not in skip["reason"]  # not blocked by capacity
-    assert "1차 확인됨" in skip["reason"]  # reached the normal confirmation gate instead
+    assert "1/3차 확인됨" in skip["reason"]  # reached the normal confirmation gate instead
 
 
 # -- per-symbol consecutive-loss cooldown ---------------------------------------------------------

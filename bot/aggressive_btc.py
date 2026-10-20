@@ -61,9 +61,10 @@ Design, as specified (per symbol, via SymbolConfig):
      bot. News (see news_cfg) is RSS feeds + an optional NewsAPI query,
      filtered per-symbol via news.SYMBOL_KEYWORDS, scored the same way as
      the main bot's crypto news signal. A direction crossing
-     ENTRY_THRESHOLD must be seen on two consecutive checks before it's
-     actually acted on (see try_enter()'s _pending_entry) -- filters a
-     single noisy tick that reverses right back from triggering a trade.
+     ENTRY_THRESHOLD must be seen on ENTRY_CONFIRMATION_TICKS (3)
+     consecutive checks before it's actually acted on (see try_enter()'s
+     _pending_entry) -- filters a single noisy tick that reverses right
+     back from triggering a trade.
   4. Stop-loss at -5% ROI.
   5. Every full hour the position stays open, if its ROI is still negative,
      close it rather than let it drift indefinitely.
@@ -76,7 +77,7 @@ Design, as specified (per symbol, via SymbolConfig):
       been losing the whole time (rule 5/SL already cover that).
   5c. Capacity rotation: when both the long and short slots are already
       taken and a DIFFERENT symbol's signal crosses ENTRY_THRESHOLD (and
-      survives the 2-tick confirmation in 3 above), the currently open
+      survives the ENTRY_CONFIRMATION_TICKS confirmation in 3 above), the currently open
       position with the highest ROI% (least loss, or most profit -- the one
       that costs least to give up), AMONG those already open at least
       ROTATION_MIN_HOLD_MINUTES, is closed to make room. This only
@@ -192,6 +193,12 @@ DISASTER_STOP_MULTIPLIER = 2.0
 # after ANETUSDT lost 3 straight times live while every other symbol traded
 # fine on the same signal logic over the same period (the same SNXXUSDT-like
 # pattern that motivated the main bot's version).
+# Entry confirmation: a direction crossing ENTRY_THRESHOLD must be seen on
+# this many consecutive checks before try_enter() acts on it (see its use
+# there). Raised from 2 to 3 alongside ENTRY_THRESHOLD 0.2->0.3 in
+# aggressive_btc_settings.py -- both aimed at the same live finding (win
+# rate declining 36.7% -> 29% -> 17% as weaker/noisier signals got traded).
+ENTRY_CONFIRMATION_TICKS = 3
 SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES = 2
 SYMBOL_PAUSE_DURATION_MIN = 360  # 6 hours
 # Capacity rotation (see try_enter()) only considers a currently open
@@ -569,11 +576,12 @@ class AggressiveBTCStrategy:
         self.symbol = cfg.symbol
         self.log_dir = log_dir
         self._last_signal_log_ts = 0.0
-        # Entry confirmation: the direction seen on the PREVIOUS non-neutral
-        # tick, cleared the moment the signal goes neutral or the direction
-        # flips. try_enter() only actually places an order once the SAME
-        # direction has been seen on two consecutive checks -- see
-        # try_enter()'s use of this for why.
+        # Entry confirmation: the direction (and consecutive-tick count)
+        # seen on the PREVIOUS non-neutral tick, cleared the moment the
+        # signal goes neutral or the direction flips. try_enter() only
+        # actually places an order once the SAME direction has been seen on
+        # ENTRY_CONFIRMATION_TICKS consecutive checks -- see try_enter()'s
+        # use of this for why.
         self._pending_entry: dict | None = None
 
     # -- signal ---------------------------------------------------------
@@ -670,16 +678,27 @@ class AggressiveBTCStrategy:
         # crosses the threshold -- a lower ENTRY_THRESHOLD trades on weaker
         # signals, which makes a single noisy tick (that reverses right back
         # on the next check) more likely to trigger an entry that immediately
-        # loses. Requiring the SAME direction on two consecutive checks
-        # filters that out, at the cost of entering one check later than the
-        # threshold itself was crossed. Applies equally to a signal that
-        # will go on to trigger rotation below -- a flickering signal
-        # shouldn't be able to bump a real position out either.
+        # loses. Requiring the SAME direction on ENTRY_CONFIRMATION_TICKS
+        # consecutive checks filters that out, at the cost of entering that
+        # many checks later than the threshold itself was crossed. Applies
+        # equally to a signal that will go on to trigger rotation below --
+        # a flickering signal shouldn't be able to bump a real position out
+        # either. A pending dict with no "count" (e.g. set directly in a
+        # test to fast-forward past confirmation) is treated as already one
+        # tick short of confirmed, matching the pre-counter behavior.
         if self._pending_entry is None or self._pending_entry.get("direction") != direction:
-            self._pending_entry = {"direction": direction}
+            self._pending_entry = {"direction": direction, "count": 1}
             self.state.set_skip_reason(
-                self.symbol, f"{direction} 1차 확인됨 - 다음 체크에서 같은 방향 유지되면 진입 "
+                self.symbol, f"{direction} 1/{ENTRY_CONFIRMATION_TICKS}차 확인됨 - 같은 방향이 "
+                             f"{ENTRY_CONFIRMATION_TICKS}번 연속 유지되면 진입 "
                              f"({self._format_signal_breakdown(signal)})")
+            return
+        count = self._pending_entry.get("count", ENTRY_CONFIRMATION_TICKS - 1) + 1
+        if count < ENTRY_CONFIRMATION_TICKS:
+            self._pending_entry = {"direction": direction, "count": count}
+            self.state.set_skip_reason(
+                self.symbol, f"{direction} {count}/{ENTRY_CONFIRMATION_TICKS}차 확인됨 - 같은 방향 "
+                             f"유지되면 진입 ({self._format_signal_breakdown(signal)})")
             return
         self._pending_entry = None  # confirmed
 
