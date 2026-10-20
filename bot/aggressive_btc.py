@@ -103,11 +103,17 @@ Design, as specified (per symbol, via SymbolConfig):
      stretch must never push leverage past this, since a sudden move hits
      hardest exactly when leverage was raised to compensate for the
      apparent calm). SOXLUSDT: [6x, 10x] (lowered from the original BTC
-     design's 24x/25x because it carries embedded 3x leverage). All 38 stock
+     design's 24x/25x because it carries embedded 3x leverage). All stock
      symbols: [8x, 15x] -- higher than SOXLUSDT since there's no embedded
      multiplier distorting the TP/SL math, but still well under the original
      24x/25x crypto design since this is a brand-new asset class for this
-     bot and real stocks can gap sharply on earnings/news.
+     bot and real stocks can gap sharply on earnings/news -- EXCEPT
+     THIN_LIQUIDITY_SYMBOLS (DJTUSDT, MNSTUSDT, ANETUSDT), lowered to
+     SOXLUSDT's own [6x, 10x] after each showed an actual closed ROI% far
+     past the configured -5% SL live (DJTUSDT -17.17%, MNSTUSDT -15.35%) --
+     thin orderbook depth at the moment their SL order fires, not something
+     leverage itself causes, but lower leverage shrinks how much ROI%
+     damage the same %-price slip does.
   8. Disaster stop: independent of (and checked before) every other
      management rule, manage_open_position() force-closes the moment ROI
      falls past DISASTER_STOP_MULTIPLIER times the symbol's own stop_loss_pct
@@ -387,16 +393,36 @@ STOCK_SYMBOLS = [
 ]
 
 
+# Symbols that have repeatedly shown an actual closed ROI% far past their
+# configured -5% SL, live -- DJTUSDT -17.17%, MNSTUSDT -15.35% -- pointing
+# at thin orderbook depth at the moment the SL order actually fires (ANETUSDT
+# closed at exactly -10.00% once too, likely disaster_stop catching what
+# would otherwise have become another one of these). This is a liquidity/
+# fill-slippage issue at the instant the exchange's own SL order triggers --
+# outside anything a polling bot can intervene on after the fact (see
+# DISASTER_STOP_MULTIPLIER's docstring: it only helps when the position is
+# still open and readable when checked, not when the SL has already fired
+# and closed it between ticks). Lowering leverage doesn't prevent the
+# slippage itself, but it does shrink how much ROI% damage the same %
+# price-slip does -- the one lever actually available here.
+THIN_LIQUIDITY_SYMBOLS = {"DJTUSDT", "MNSTUSDT", "ANETUSDT"}
+
+
 def _make_stock_config(sym: str, news_cfg: dict) -> SymbolConfig:
     # No embedded leverage to distort the TP/SL math (unlike SOXLUSDT/the
     # removed SNXXUSDT) -- a somewhat higher range is reasonable, but kept
     # well under the original 24x/25x crypto design since this is a
     # brand-new asset class for this bot and real stocks can gap sharply on
     # earnings/news between 1h candles. Same treatment for every stock
-    # symbol regardless of theme/pool.
+    # symbol regardless of theme/pool, EXCEPT THIN_LIQUIDITY_SYMBOLS above,
+    # which get SOXLUSDT's lower [6x,10x]/10x range instead.
+    if sym in THIN_LIQUIDITY_SYMBOLS:
+        min_leverage, max_leverage, leverage_hard_cap = 6.0, 10.0, 10.0
+    else:
+        min_leverage, max_leverage, leverage_hard_cap = 8.0, 15.0, 15.0
     return SymbolConfig(
         symbol=sym,
-        min_leverage=8.0, max_leverage=15.0, leverage_hard_cap=15.0,
+        min_leverage=min_leverage, max_leverage=max_leverage, leverage_hard_cap=leverage_hard_cap,
         min_confidence_to_enter=ENTRY_THRESHOLD,
         tech_weight=0.15, volume_weight=0.15, poly_weight=0.0, news_weight=0.70,
         polymarket_cfg=_STOCK_POLYMARKET_CFG,

@@ -47,12 +47,23 @@ def test_aggressive_configs_has_soxl_plus_38_distinct_stock_symbols_across_two_p
     assert "AVGOUSDT" in [sc.symbol for sc in semi_ai_configs]  # moved from the general pool -- it's a chipmaker too
 
     for sc in semi_ai_configs + stock_configs:
+        if sc.symbol in aggressive_btc.THIN_LIQUIDITY_SYMBOLS:
+            continue  # checked separately below -- lowered leverage range
         # No embedded leverage on these (unlike SOXLUSDT) -- allowed a higher
         # range, but still well under the original 24x/25x crypto design.
         assert sc.min_leverage == 8.0
         assert sc.max_leverage == 15.0
         assert sc.leverage_hard_cap == 15.0
         assert sc.margin_pct_of_equity == 50.0  # safe only because of the global 1-position cap
+
+    # DJTUSDT/MNSTUSDT/ANETUSDT each showed an actual closed ROI% far past
+    # the configured -5% SL live -- lowered to SOXLUSDT's own [6x,10x]/10x
+    # range so the same %-price slippage does less ROI% damage.
+    for sym in aggressive_btc.THIN_LIQUIDITY_SYMBOLS:
+        sc = next(sc for sc in semi_ai_configs + stock_configs if sc.symbol == sym)
+        assert sc.min_leverage == 6.0
+        assert sc.max_leverage == 10.0
+        assert sc.leverage_hard_cap == 10.0
 
     # The two pools use genuinely different news_cfg objects (separate RSS
     # pools/NewsSignal instances), not just coincidentally-equal dicts.
