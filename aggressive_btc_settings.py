@@ -16,8 +16,11 @@ strategy logic. Currently just the one: ENTRY_THRESHOLD.
 # page (its own entry_threshold field there is independent of this one -- it
 # lets you try a value against real history without touching live trading).
 #
-# Raised back to 0.3 from 0.2 after live win rate kept declining (36.7% ->
-# 29% -> 17% across successive days) as weaker signals were traded more
-# often -- trading less often on higher-conviction signals should raise win
-# rate back up, at the cost of fewer trades/slower compounding.
+# Raised to 0.3 from 0.2 on 2026-10-20 after live win rate kept declining
+# (36.7% -> 29% -> 17% across successive days) as weaker signals were
+# traded more often. Lowered back down to 0.25 then 0.22 on 2026-10-21
+# (manual edits) -- trade frequency at 0.3 was apparently too slow for the
+# user's taste. Current value trades more often on weaker signals than 0.3
+# did; see the dashboard's /backtest threshold comparison before moving it
+# further in either direction.
 ENTRY_THRESHOLD = 0.22
