@@ -144,6 +144,10 @@ Design, as specified (per symbol, via SymbolConfig):
       leverage UP (toward max_leverage/leverage_hard_cap, to still reach the
       ROI target), so without this floor the lowest-conviction regime would
       also end up the highest-leverage one.
+  12. Dashboard on/off switch: a sentinel file at pause_flag_path(), toggled
+      from the dashboard, blocks every symbol's try_enter() (new entries
+      only) until removed -- see pause_flag_path()'s own docstring. Existing
+      open positions keep being fully managed regardless.
 
 ================================================================================
 TESTNET below is the ONLY thing that needs to change to go live. Defaults to
@@ -485,6 +489,20 @@ def state_path() -> str:
     return os.path.join(os.getenv("DATA_DIR", "data"), "aggressive_btc_state.json")
 
 
+def pause_flag_path() -> str:
+    """Dashboard on/off toggle for NEW entries only (see try_enter()'s use of
+    this) -- existing open positions keep being managed by manage_open_
+    position() regardless (SL/TP/hourly-cutoff/breakeven-stop/disaster-stop
+    all keep running), since abandoning monitoring on an open leveraged
+    position just because trading was paused would be more dangerous, not
+    less. A tiny sentinel file, same cross-process pattern as StateStore's
+    daily-loss-reset flag -- the dashboard and this bot are separate
+    processes, so the dashboard just touches/removes this file and this
+    bot's own process polls for it on every try_enter() call.
+    """
+    return os.path.join(os.getenv("DATA_DIR", "data"), "aggressive_btc_paused.flag")
+
+
 def compute_leverage(atr_pct: float, target_pct: float = 12.0, min_leverage: float = 6.0,
                       max_leverage: float = 10.0, hard_cap: float = 10.0) -> float:
     """Sizes leverage so `target_pct` ROI is roughly reachable given the
@@ -676,6 +694,10 @@ class AggressiveBTCStrategy:
 
     def try_enter(self):
         if self.state.get_trade(self.symbol) is not None:
+            return
+
+        if os.path.exists(pause_flag_path()):
+            self.state.set_skip_reason(self.symbol, "자동 거래 일시중지됨 (대시보드에서 재개 가능)")
             return
 
         backoff = self.state.get_entry_backoff(self.symbol)

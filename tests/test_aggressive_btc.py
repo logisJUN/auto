@@ -1069,6 +1069,70 @@ def test_manage_open_position_settles_when_sl_tp_already_closed_it(tmp_path):
     assert history[-1]["pnl"] == 6.0
 
 
+# -- dashboard on/off switch (pause_flag_path) ---------------------------------------------------------
+
+def test_try_enter_skips_all_new_entries_when_paused(tmp_path, monkeypatch):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    flag_path = tmp_path / "aggressive_btc_paused.flag"
+    flag_path.touch()
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+
+    strategy.try_enter()
+
+    client.get_klines.assert_not_called()  # never even computed the signal
+    reason = state.get_skip_reason(SYMBOL)
+    assert reason is not None
+    assert "일시중지" in reason["reason"]
+
+
+def test_try_enter_proceeds_normally_once_the_pause_flag_is_removed(tmp_path, monkeypatch):
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    flag_path = tmp_path / "aggressive_btc_paused.flag"  # never created -- not paused
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    strategy.get_signal = lambda: {"direction": "long", "score": 0.8, "atr": 1.5, "close": 140.0}
+    strategy._pending_entry = {"direction": "long"}
+    client.get_equity_usdt.return_value = 100.0
+    client.get_available_balance_usdt.return_value = 1_000_000.0
+    client.get_last_price.return_value = 140.0
+    client.open_position.return_value = {}
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 140.0,
+        "unrealized_pnl": 0.0, "position_idx": 0, "stop_loss": 130.0, "take_profit": 150.0,
+    }
+
+    strategy.try_enter()
+
+    client.open_position.assert_called_once()
+
+
+def test_manage_open_position_keeps_managing_an_existing_trade_while_paused(tmp_path, monkeypatch):
+    # Pausing blocks NEW entries only -- an already-open position must keep
+    # being managed (hourly cutoff here) regardless of the pause flag.
+    strategy, state, client, poly_signal = _make_strategy(tmp_path)
+    flag_path = tmp_path / "aggressive_btc_paused.flag"
+    flag_path.touch()
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    state.set_trade(SYMBOL, {
+        "symbol": SYMBOL, "side": "long", "entry_price": 100.0, "qty": 1.0,
+        "margin": 50.0, "leverage": 12.0, "current_sl": 90.0, "current_tp": 101.0,
+        "opened_at": time.time() - 3700, "last_hour_checked": 0,
+    })
+    client.get_position.return_value = {
+        "symbol": SYMBOL, "side": "Buy", "size": 1.0, "entry_price": 100.0,
+        "unrealized_pnl": -1.0, "position_idx": 0, "stop_loss": 90.0, "take_profit": 101.0,
+    }
+    client.close_position.return_value = {}
+    client.get_closed_pnl.return_value = None
+    client.get_last_price.return_value = 99.5
+
+    strategy.tick()  # trade is open -> dispatches to manage_open_position(), not try_enter()
+
+    client.close_position.assert_called_once()
+    assert state.get_trade(SYMBOL) is None
+    history = state.snapshot()["history"]
+    assert history[-1]["reason"] == "hourly_cutoff"
+
+
 def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_trade(SYMBOL, {

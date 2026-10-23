@@ -1,10 +1,11 @@
 """Mostly read-only monitoring dashboard, meant to be opened from Safari on an
 iPad. Runs as a separate process from the bot (deploy/dashboard.service) so a
-dashboard problem can never affect trading -- the one exception is the daily-
-loss reset button, which writes a tiny sentinel file the bot's own process
-polls for and acts on itself (see StateStore.request_daily_reset), rather
-than mutating shared state directly. Auto-refreshes every 20s; requires
-?token=... matching DASHBOARD_TOKEN in .env.
+dashboard problem can never affect trading -- the exceptions are the daily-
+loss reset button and the aggressive_btc pause/resume toggle, each of which
+writes a tiny sentinel file the relevant bot process polls for and acts on
+itself (see StateStore.request_daily_reset and aggressive_btc.pause_flag_path),
+rather than mutating shared state directly. Auto-refreshes every 20s;
+requires ?token=... matching DASHBOARD_TOKEN in .env.
 
 Run: python -m dashboard.app
 """
@@ -428,8 +429,13 @@ TEMPLATE = """
   .copy-btn:active { background:#30363d; }
   .reset-btn { width:100%; background:#4d1a1a; color:#ff7b72; border:1px solid #6e2323;
                border-radius:6px; padding:10px 12px; font-size:0.85rem; font-weight:600; }
+  .pause-btn { background:#4d1a1a; color:#ff7b72; border:1px solid #6e2323; }
+  .resume-btn { background:#1a4d2e; color:#7ee787; border:1px solid #236e3f; }
+  .pause-btn, .resume-btn { border-radius:6px; padding:6px 14px; font-size:0.85rem; font-weight:600; }
   a { color:#7ee787; }
   .reset-btn:active { background:#6e2323; }
+  .pause-btn:active { background:#6e2323; }
+  .resume-btn:active { background:#236e3f; }
 </style>
 </head>
 <body>
@@ -631,7 +637,17 @@ TEMPLATE = """
     <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
     <div class="grid" style="margin-bottom:10px;">
       <div><div class="stat-label">누적손익(10/01~) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
+      <div><div class="stat-label">자동 진입</div><div class="stat-value">
+        <span class="{{ 'pnl-neg' if aggressive_paused else 'pnl-pos' }}">{{ '일시중지' if aggressive_paused else 'ON' }}</span>
+      </div></div>
     </div>
+    <form method="POST" action="/aggressive-btc/toggle?token={{ token }}" style="margin-bottom:10px;"
+          onsubmit="return confirm('{{ '자동 거래를 재개할까요? (새 진입이 다시 시작됩니다)' if aggressive_paused else '자동 거래를 일시중지할까요? (새 진입만 막히고, 열려 있는 포지션은 계속 관리됩니다)' }}');">
+      <input type="hidden" name="action" value="{{ 'resume' if aggressive_paused else 'pause' }}">
+      <button type="submit" class="{{ 'resume-btn' if aggressive_paused else 'pause-btn' }}">
+        {{ '▶ 자동 거래 재개' if aggressive_paused else '⏸ 자동 거래 일시중지' }}
+      </button>
+    </form>
     <table>
       <tr><th>심볼</th><th>상태</th><th>누적손익(10/01~)</th><th>거래수</th><th></th></tr>
       {% for agg in aggressive_list %}
@@ -819,6 +835,25 @@ def healthz():
     # Public, no token, no Bybit calls -- meant for uptime pingers (e.g.
     # UptimeRobot) keeping a Render free-plan service from sleeping.
     return "ok", 200
+
+
+@app.route("/aggressive-btc/toggle", methods=["POST"])
+def toggle_aggressive_btc():
+    """On/off switch for aggressive_btc's NEW entries only -- an already-open
+    position keeps being fully managed regardless (see pause_flag_path()'s
+    own docstring for why). Same cross-process sentinel-file pattern as
+    reset_daily_loss: this dashboard process and the aggressive_btc bot
+    process each hold their own state, so this just touches/removes a flag
+    file on disk that the bot's own process polls on every try_enter() call.
+    """
+    _check_token()
+    flag_path = Path(aggressive_btc.pause_flag_path())
+    if request.form.get("action") == "pause":
+        flag_path.touch()
+    else:
+        flag_path.unlink(missing_ok=True)
+    token = request.args.get("token", "")
+    return redirect(f"/?token={token}")
 
 
 @app.route("/reset-daily-loss", methods=["POST"])
@@ -1333,6 +1368,7 @@ def index():
     perf = compute_performance_summary(log_dir)
     aggressive_list = _build_aggressive_btc_views(client)
     aggressive_totals = {"cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list)}
+    aggressive_paused = os.path.exists(aggressive_btc.pause_flag_path())
 
     return render_template_string(
         TEMPLATE,
@@ -1357,6 +1393,7 @@ def index():
         perf=perf,
         aggressive_list=aggressive_list,
         aggressive_totals=aggressive_totals,
+        aggressive_paused=aggressive_paused,
     )
 
 
