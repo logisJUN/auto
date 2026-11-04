@@ -12,6 +12,15 @@ import pandas as pd
 
 def to_dataframe(candles: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(candles)
+    if df.empty:
+        # pd.DataFrame([]) has no columns at all (not just 0 rows) -- sorting
+        # by "ts" would raise KeyError rather than returning an empty frame.
+        # Observed live (KEYUSDT): get_klines() returning [] for one tick
+        # crashed the whole strategy.tick() call instead of just reading as
+        # "no data this tick" (score_timeframe's own len(df) < ... check
+        # already handles an empty/too-short frame gracefully once it gets
+        # one back without crashing first).
+        return df
     df = df.sort_values("ts").reset_index(drop=True)
     return df
 

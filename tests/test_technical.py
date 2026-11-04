@@ -43,6 +43,19 @@ def test_insufficient_data_returns_neutral_without_crashing():
     assert result["score"] == 0.0
 
 
+def test_empty_candles_returns_neutral_without_crashing():
+    # pd.DataFrame([]) has no "ts" column at all (not just 0 rows) --
+    # observed live (KEYUSDT): get_klines() returning [] for one tick
+    # crashed the whole strategy.tick() call via a KeyError inside
+    # to_dataframe's sort_values("ts"), instead of reading as "no data this
+    # tick" the way score_timeframe's own length check already intends.
+    result = technical.score_timeframe([], TECH_CFG)
+    assert result == {"score": 0.0, "atr": 0.0, "close": 0.0, "rsi": 50.0}
+    assert technical.volume_score([]) == 0.0
+    assert technical.recent_extension([], atr=1.0) == 0.0
+    assert technical.to_dataframe([]).empty
+
+
 def test_volume_score_amplifies_direction_on_spike():
     prices = [100 + i * 0.1 for i in range(25)]
     candles = _make_candles(prices)
