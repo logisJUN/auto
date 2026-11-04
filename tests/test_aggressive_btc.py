@@ -32,12 +32,17 @@ from bot.state import StateStore
 
 # -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
 
-def test_aggressive_configs_has_soxl_plus_85_distinct_stock_symbols_across_four_pools():
+def test_aggressive_configs_has_85_distinct_stock_symbols_across_four_pools():
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
-    assert symbols[0] == "SOXLUSDT"
     assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
-    assert len(symbols) == 86
-    assert len(set(symbols)) == 86  # no duplicates
+    # SOXL_CONFIG is still DEFINED (used elsewhere as a representative test
+    # fixture, see SYMBOL/_make_strategy) but, by explicit decision, no
+    # longer included here -- same embedded-leverage PNL unpredictability
+    # category as SNXXUSDT, plus it can't participate in EDGAR filing
+    # detection (a tokenized ETF files nothing with the SEC).
+    assert "SOXLUSDT" not in symbols
+    assert len(symbols) == 85
+    assert len(set(symbols)) == 85  # no duplicates
 
     semi_ai_configs = aggressive_btc.SEMI_AI_CONFIGS
     stock_configs = aggressive_btc.STOCK_CONFIGS

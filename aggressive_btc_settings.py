@@ -3,14 +3,16 @@ strategy logic. Currently just the one: ENTRY_THRESHOLD.
 """
 
 # |blended score| needed to enter a position, in either direction, for every
-# configured aggressive_btc symbol (SOXLUSDT + all 85 stock tokens) -- change
-# this one number to retune entry sensitivity across all 86 at once.
+# configured aggressive_btc symbol (all 85 stock tokens) -- change this one
+# number to retune entry sensitivity across all 85 at once.
 # Lower = trades more often on weaker signals, so win rate/trade quality can
 # drop. Higher = trades less often but only on stronger ones.
 #
-# Was raised to 0.4 from an original 0.5 for SOXLUSDT specifically because at
-# 0.5, 1h SOXLUSDT rarely produced a strong enough blended score to enter at
-# all (observed live: a +0.34 blend sat under the bar for hours).
+# Was raised to 0.4 from an original 0.5 for SOXLUSDT specifically (back
+# when SOXL_CONFIG was still part of AGGRESSIVE_CONFIGS -- it no longer is,
+# see aggressive_btc.py's module docstring) because at 0.5, 1h SOXLUSDT
+# rarely produced a strong enough blended score to enter at all (observed
+# live: a +0.34 blend sat under the bar for hours).
 #
 # Before changing it, backtest the new value via the dashboard's /backtest
 # page (its own entry_threshold field there is independent of this one -- it

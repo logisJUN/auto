@@ -151,7 +151,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
 
 def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
-    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 85 stock tokens) --
+    (see aggressive_btc.AGGRESSIVE_CONFIGS: 85 stock tokens) --
     empty list if that module has never run (no state file yet), so this
     section simply doesn't render rather than showing an empty shell forever.
     All configured symbols share ONE state file (StateStore's trades/history/
@@ -1320,14 +1320,17 @@ def check_sp500_symbols_route():
 @app.route("/backtest")
 def backtest_route():
     """Triggers bot/backtest.py against real historical candles for one
-    configured aggressive_btc symbol (?symbol=..., defaulting to SOXLUSDT),
-    fetched live via Bybit (see bot.backtest's module docstring for what
-    this can/can't validate -- technical+volume only, news can't be
-    backtested). GET so it's just a link/bookmark, no state mutated.
+    configured aggressive_btc symbol (?symbol=..., defaulting to whichever
+    symbol is first in AGGRESSIVE_CONFIGS -- aggressive_btc.SYMBOL is
+    SOXLUSDT specifically, which is no longer in that list, so it can't be
+    used as the default here), fetched live via Bybit (see bot.backtest's
+    module docstring for what this can/can't validate -- technical+volume
+    only, news can't be backtested). GET so it's just a link/bookmark, no
+    state mutated.
     """
     _check_token()
     configured_symbols = {sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
-    symbol = request.args.get("symbol", aggressive_btc.SYMBOL)
+    symbol = request.args.get("symbol", aggressive_btc.AGGRESSIVE_CONFIGS[0].symbol)
     if symbol not in configured_symbols:
         abort(400)
     try:

@@ -1,14 +1,14 @@
 """Standalone aggressive scalp strategy, run independently per symbol (see
-AGGRESSIVE_CONFIGS below: SOXLUSDT plus 85 non-leveraged tokenized US stocks,
-split across four themed news pools -- SEMI_AI_CONFIGS for semiconductor/
-AI-infrastructure names, STOCK_CONFIGS for general software/consumer/space
-names, FINANCE_CONFIGS for banks/payments/brokers/insurers, and
-ENERGY_CONFIGS for oil/gas majors. The 47 FINANCE_CONFIGS/ENERGY_CONFIGS/
-newer SEMI_AI_CONFIGS/STOCK_CONFIGS symbols were added via a cross-check of
-S&P 500 constituents against Bybit's actual tokenized-stock listing (see
-dashboard/app.py's /check-sp500-symbols route) -- restricted to the
-financials/IT/communication-services/energy/semiconductor sectors by
-explicit choice, not the full S&P 500 candidate pool that check turned up.
+AGGRESSIVE_CONFIGS below: 85 non-leveraged tokenized US stocks, split across
+four themed news pools -- SEMI_AI_CONFIGS for semiconductor/AI-infrastructure
+names, STOCK_CONFIGS for general software/consumer/space names,
+FINANCE_CONFIGS for banks/payments/brokers/insurers, and ENERGY_CONFIGS for
+oil/gas majors. The 47 FINANCE_CONFIGS/ENERGY_CONFIGS/newer SEMI_AI_CONFIGS/
+STOCK_CONFIGS symbols were added via a cross-check of S&P 500 constituents
+against Bybit's actual tokenized-stock listing (see dashboard/app.py's
+/check-sp500-symbols route) -- restricted to the financials/IT/
+communication-services/energy/semiconductor sectors by explicit choice, not
+the full S&P 500 candidate pool that check turned up.
 
 Deliberately SEPARATE from bot/strategy.py (the main, conservative
 multi-symbol system this whole codebase was built around) -- different risk
@@ -23,28 +23,36 @@ dicts are identical (see main()'s _signal_cache) so the symbols in each of
 the four stock news pools don't each independently re-fetch the same RSS
 feeds.
 
-SOXLUSDT is NOT a plain coin -- it's a tokenized 3x leveraged semiconductor-
-index ETF. The main bot's config.yaml excludes it from its own universe scan
-for exactly this reason: realized PNL on this kind of embedded-leverage
-token has been observed live diverging from what entry/exit price * qty *
-leverage alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4%
-price move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math
-would predict -- SNXXUSDT was tried here and then removed from this module
-for exactly that unpredictability). The 85 stock symbols below are
-DELIBERATELY NOT this kind of product -- they're Bybit's 1x tokenized-stock
-perpetuals (e.g. AAPLUSDT tracks Apple's share price directly, no embedded
-multiplier), chosen specifically to avoid the embedded-leverage risk that
-made SNXXUSDT's behavior unreliable. The original 38 were verified the slow
-way (screenshots, then main()'s own startup-validation skip-on-failure); the
-47 newer ones were verified directly via /check-sp500-symbols's live
-get_instrument_info() check before being added, so they should all already
-be tradable -- main()'s startup validation still runs as the final backstop
-regardless (skips, with a logged warning + notifier message, any ticker that
-turns out not to exist or not be tradable rather than crashing). Check the
-dashboard after a deploy to see which actually came up; any missing one
-needs its ticker corrected against the Bybit app.
+SOXL_CONFIG (SOXLUSDT, a tokenized 3x leveraged semiconductor-index ETF) is
+still DEFINED below but, by explicit decision, no longer included in
+AGGRESSIVE_CONFIGS -- it's kept only because the test suite still uses it as
+a representative SymbolConfig fixture. It was this module's original symbol
+and, in the most recent trading data at removal time, its single best
+performer -- removed anyway for consistency with the rest of this universe:
+every other configured symbol is a real company's 1x stock token (so it can
+participate in EDGAR filing detection, see bot/signals/edgar.py, and in
+plain per-symbol news matching), while SOXLUSDT is a tokenized ETF with
+embedded 3x leverage that files nothing with the SEC and whose realized PNL
+has been observed live diverging from what entry/exit price * qty * leverage
+alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4% price
+move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math would
+predict -- SNXXUSDT was tried here and then removed from this module for
+exactly that unpredictability; SOXLUSDT never showed that specific symptom,
+but carries the same structural risk category). The 85 stock symbols
+actually in AGGRESSIVE_CONFIGS are DELIBERATELY NOT this kind of product --
+they're Bybit's 1x tokenized-stock perpetuals (e.g. AAPLUSDT tracks Apple's
+share price directly, no embedded multiplier). The original 38 were
+verified the slow way (screenshots, then main()'s own startup-validation
+skip-on-failure); the 47 newer ones were verified directly via
+/check-sp500-symbols's live get_instrument_info() check before being added,
+so they should all already be tradable -- main()'s startup validation still
+runs as the final backstop regardless (skips, with a logged warning +
+notifier message, any ticker that turns out not to exist or not be tradable
+rather than crashing). Check the dashboard after a deploy to see which
+actually came up; any missing one needs its ticker corrected against the
+Bybit app.
 
-Because all 86 symbols independently look for entry signals every tick, this
+Because all 85 symbols independently look for entry signals every tick, this
 module enforces a capacity cap of at most ONE LONG and ONE SHORT open at a
 time across all of them -- two concurrent positions total, never two on the
 same side (see try_enter()'s check of state.open_trade_sides()). A deliberate
@@ -53,9 +61,9 @@ minimum margin at once) so the existing 50%-of-equity-per-trade sizing never
 has to be shared or diluted across more than two concurrent positions -- in
 the worst case (a long and a short both open at once) that's up to ~100% of
 equity committed as margin, which get_available_balance_usdt()'s clamp in
-try_enter() still protects against literally overdrawing. With 86 symbols
+try_enter() still protects against literally overdrawing. With 85 symbols
 each doing its own kline fetch every tick (POLL_SEC=30s, more than double
-the ~39 this module ran with before), one tick loop iteration now makes ~86
+the ~39 this module ran with before), one tick loop iteration now makes ~85
 sequential Bybit API calls before sleeping -- the loop degrades gracefully
 if that ever takes longer than POLL_SEC (tick()'s own sleep is clamped to a
 1s minimum, never negative), but this is meaningfully more per-loop API load
@@ -115,18 +123,19 @@ Design, as specified (per symbol, via SymbolConfig):
      matter how low volatility reads (the real safety backstop: a calm
      stretch must never push leverage past this, since a sudden move hits
      hardest exactly when leverage was raised to compensate for the
-     apparent calm). SOXLUSDT: [6x, 10x] (lowered from the original BTC
-     design's 24x/25x because it carries embedded 3x leverage). All stock
-     symbols: [8x, 15x] -- higher than SOXLUSDT since there's no embedded
-     multiplier distorting the TP/SL math, but still well under the original
-     24x/25x crypto design since this is a brand-new asset class for this
-     bot and real stocks can gap sharply on earnings/news -- EXCEPT
-     THIN_LIQUIDITY_SYMBOLS (DJTUSDT, MNSTUSDT, ANETUSDT), lowered to
-     SOXLUSDT's own [6x, 10x] after each showed an actual closed ROI% far
-     past the configured -5% SL live (DJTUSDT -17.17%, MNSTUSDT -15.35%) --
-     thin orderbook depth at the moment their SL order fires, not something
-     leverage itself causes, but lower leverage shrinks how much ROI%
-     damage the same %-price slip does.
+     apparent calm). SOXL_CONFIG (no longer in AGGRESSIVE_CONFIGS, see the
+     module docstring) used [6x, 10x] (lowered from the original BTC
+     design's 24x/25x because it carried embedded 3x leverage). All stock
+     symbols actually configured now: [8x, 15x] -- higher than SOXL_CONFIG's
+     range since there's no embedded multiplier distorting the TP/SL math,
+     but still well under the original 24x/25x crypto design since this is a
+     brand-new asset class for this bot and real stocks can gap sharply on
+     earnings/news -- EXCEPT THIN_LIQUIDITY_SYMBOLS (DJTUSDT, MNSTUSDT,
+     ANETUSDT), lowered to that same [6x, 10x] range after each showed an
+     actual closed ROI% far past the configured -5% SL live (DJTUSDT
+     -17.17%, MNSTUSDT -15.35%) -- thin orderbook depth at the moment their
+     SL order fires, not something leverage itself causes, but lower
+     leverage shrinks how much ROI% damage the same %-price slip does.
   8. Disaster stop: independent of (and checked before) every other
      management rule, manage_open_position() force-closes the moment ROI
      falls past DISASTER_STOP_MULTIPLIER times the symbol's own stop_loss_pct
@@ -285,11 +294,14 @@ TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
 @dataclass
 class SymbolConfig:
-    """Per-symbol knobs. 86 instances of this (SOXL_CONFIG plus every
-    SEMI_AI_CONFIGS/STOCK_CONFIGS/FINANCE_CONFIGS/ENERGY_CONFIGS entry, built
-    by _make_stock_config) each drive one AggressiveBTCStrategy; everything
-    else about the strategy's mechanics (hourly cutoff, poll interval, TP/SL
-    formula) is shared via the module-level constants above.
+    """Per-symbol knobs. 85 instances of this (every SEMI_AI_CONFIGS/
+    STOCK_CONFIGS/FINANCE_CONFIGS/ENERGY_CONFIGS entry, built by
+    _make_stock_config) each drive one AggressiveBTCStrategy in production;
+    a 86th instance, SOXL_CONFIG, is also defined but deliberately excluded
+    from AGGRESSIVE_CONFIGS (see the module docstring) and kept only as a
+    test fixture. Everything else about the strategy's mechanics (hourly
+    cutoff, poll interval, TP/SL formula) is shared via the module-level
+    constants above.
     """
     symbol: str
     target_pct: float = 12.0               # take-profit, % ROI on margin
@@ -566,12 +578,16 @@ FINANCE_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _FINANCE_NEWS_CFG
 ENERGY_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _ENERGY_NEWS_CFG) for sym in ENERGY_SYMBOLS]
 
 AGGRESSIVE_CONFIGS: list[SymbolConfig] = (
-    [SOXL_CONFIG] + SEMI_AI_CONFIGS + STOCK_CONFIGS + FINANCE_CONFIGS + ENERGY_CONFIGS
+    SEMI_AI_CONFIGS + STOCK_CONFIGS + FINANCE_CONFIGS + ENERGY_CONFIGS
 )
 
-# Backward-compat alias: the strategy was originally SOXLUSDT-only, and a few
-# places (dashboard's default /backtest symbol, old references) still want
-# "the primary configured symbol" without iterating the whole list.
+# SOXL_CONFIG.symbol ("SOXLUSDT") specifically -- kept as a module-level
+# constant purely because the test suite uses it throughout as a
+# representative symbol string for a strategy built on SOXL_CONFIG (which is
+# itself still defined above but no longer part of AGGRESSIVE_CONFIGS, see
+# the module docstring). NOT the "default configured symbol" anymore --
+# dashboard/app.py's /backtest route picks its own default directly from
+# AGGRESSIVE_CONFIGS instead of using this.
 SYMBOL = SOXL_CONFIG.symbol
 
 
@@ -1375,11 +1391,11 @@ def main():
                                                  symbol_cfg, log_dir))
     configs_by_symbol = {sc.symbol: sc for sc in valid_configs}
 
-    # Real-company tickers only -- SOXLUSDT is a tokenized ETF, not a company
-    # that itself files anything with the SEC.
-    edgar_watcher = EdgarFilingWatcher(
-        {sc.symbol.replace("USDT", "") for sc in valid_configs if sc.symbol != "SOXLUSDT"}
-    )
+    # Every symbol in AGGRESSIVE_CONFIGS is now a real company's stock token
+    # (SOXL_CONFIG, a tokenized ETF that files nothing with the SEC, was
+    # excluded from AGGRESSIVE_CONFIGS entirely -- see the module docstring),
+    # so no filtering is needed here.
+    edgar_watcher = EdgarFilingWatcher({sc.symbol.replace("USDT", "") for sc in valid_configs})
 
     active_symbols_desc = ", ".join(sc.symbol for sc in valid_configs)
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {active_symbols_desc}")
