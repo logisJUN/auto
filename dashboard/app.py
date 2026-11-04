@@ -550,7 +550,7 @@ TEMPLATE = """
     {% endif %}
     {% if positions %}
     <table>
-      <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현손익</th></tr>
+      <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>손익율</th><th>미실현손익</th></tr>
       {% for p in positions %}
       <tr>
         <td>{{ p.symbol }}{% if p.manual %} <span class="small">(수동)</span>{% endif %}</td>
@@ -561,6 +561,8 @@ TEMPLATE = """
         <td>{{ p.last_price }}</td>
         <td>{% if p.current_sl %}{{ p.current_sl }} ({{ '%+.2f'|format(p.sl_pct) }}%){% else %}미설정{% endif %}</td>
         <td>{% if p.current_tp %}{{ p.current_tp }} ({{ '%+.2f'|format(p.tp_pct) }}%){% else %}미설정{% endif %}</td>
+        <td class="{{ 'pnl-pos' if p.roi_pct is not none and p.roi_pct >= 0 else 'pnl-neg' }}">
+          {{ '%+.2f'|format(p.roi_pct) + '%' if p.roi_pct is not none else '-' }}</td>
         <td class="{{ 'pnl-pos' if p.unrealized >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(p.unrealized) }}</td>
       </tr>
       {% endfor %}
@@ -1431,12 +1433,15 @@ def index():
         else:
             unrealized = (trade["entry_price"] - last_price) * trade["qty"]
         leverage = trade.get("leverage") or 1
-        margin_pct = (trade["qty"] * trade["entry_price"] / leverage) / equity * 100.0 if equity > 0 else 0.0
+        margin = (trade["qty"] * trade["entry_price"] / leverage) if leverage > 0 else 0.0
+        margin_pct = (margin / equity * 100.0) if equity > 0 else 0.0
+        roi_pct = (unrealized / margin * 100.0) if margin > 0 else 0.0
         entry = trade["entry_price"]
         sl_pct = (trade["current_sl"] / entry - 1) * 100.0 if entry > 0 else 0.0
         tp_pct = (trade["current_tp"] / entry - 1) * 100.0 if entry > 0 else 0.0
         positions.append({**trade, "last_price": round(last_price, 6), "unrealized": unrealized,
-                           "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct, "manual": False})
+                           "margin_pct": margin_pct, "roi_pct": roi_pct, "sl_pct": sl_pct, "tp_pct": tp_pct,
+                           "manual": False})
 
     # Positions open on the exchange but tracked by NEITHER this bot's local
     # state NOR aggressive_btc's -- i.e. opened manually on the Bybit app.
@@ -1490,14 +1495,16 @@ def index():
         except BybitAPIError:
             last_price = entry_price
         leverage = pos.get("leverage") or None
-        margin_pct = (pos["size"] * entry_price / leverage) / equity * 100.0 if (leverage and equity > 0) else None
+        margin = (pos["size"] * entry_price / leverage) if (leverage and leverage > 0) else None
+        margin_pct = (margin / equity * 100.0) if (margin is not None and equity > 0) else None
+        roi_pct = (pos["unrealized_pnl"] / margin * 100.0) if (margin is not None and margin > 0) else None
         sl_pct = (pos["stop_loss"] / entry_price - 1) * 100.0 if (pos["stop_loss"] > 0 and entry_price > 0) else None
         tp_pct = (pos["take_profit"] / entry_price - 1) * 100.0 if (pos["take_profit"] > 0 and entry_price > 0) else None
         positions.append({
             "symbol": symbol, "side": side, "entry_price": entry_price, "qty": pos["size"],
             "leverage": leverage, "current_sl": pos["stop_loss"] or None, "current_tp": pos["take_profit"] or None,
             "last_price": round(last_price, 6), "unrealized": pos["unrealized_pnl"],
-            "margin_pct": margin_pct, "sl_pct": sl_pct, "tp_pct": tp_pct, "manual": True,
+            "margin_pct": margin_pct, "roi_pct": roi_pct, "sl_pct": sl_pct, "tp_pct": tp_pct, "manual": True,
         })
 
     total_unrealized = sum(p["unrealized"] for p in positions)
