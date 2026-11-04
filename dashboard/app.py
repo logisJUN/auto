@@ -151,7 +151,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
 
 def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
-    (see aggressive_btc.AGGRESSIVE_CONFIGS: 84 stock tokens) --
+    (see aggressive_btc.AGGRESSIVE_CONFIGS: 82 stock tokens) --
     empty list if that module has never run (no state file yet), so this
     section simply doesn't render rather than showing an empty shell forever.
     All configured symbols share ONE state file (StateStore's trades/history/
@@ -1466,6 +1466,19 @@ def index():
         exchange_positions = []
         exchange_query_error = str(exc)
         logger.warning("dashboard: get_all_open_positions failed: %s", exc)
+
+    # Supplement the bulk listing above with a direct per-symbol scan across
+    # aggressive_btc's configured universe -- see
+    # aggressive_btc.scan_configured_symbol_positions's docstring for the
+    # live-observed gap this works around (a genuinely open TradFi stock
+    # position that the bulk call above never returned at all, confirmed
+    # directly on the Bybit app). Only adds a symbol the bulk call didn't
+    # already report.
+    seen_symbols = {pos["symbol"] for pos in exchange_positions}
+    for symbol, pos in aggressive_btc.scan_configured_symbol_positions(client).items():
+        if symbol not in seen_symbols:
+            exchange_positions.append(pos)
+
     for pos in exchange_positions:
         symbol = pos["symbol"]
         if symbol in tracked_symbols:

@@ -122,7 +122,7 @@ SYMBOL_KEYWORDS = {
     "PLTRUSDT": ["palantir"],
     "NFLXUSDT": ["netflix"],
     "RDDTUSDT": ["reddit inc", "reddit ipo"],
-    "TUSDT": ["at&t", "att inc"],
+    # TUSDT (AT&T) excluded -- see aggressive_btc.STOCK_SYMBOLS's comment.
     "TTWOUSDT": ["take-two interactive", "take two interactive"],
     # Third pool, FINANCE_CONFIGS -- banks/payments/brokers/insurers.
     "AXPUSDT": ["american express"],
@@ -136,7 +136,7 @@ SYMBOL_KEYWORDS = {
     "HOODUSDT": ["robinhood markets", "robinhood app", "vlad tenev"],
     "IBKRUSDT": ["interactive brokers"],
     "JPMUSDT": ["jpmorgan", "jp morgan", "jamie dimon"],
-    "KEYUSDT": ["keycorp", "keybank"],
+    # KEYUSDT (KeyCorp) excluded -- see aggressive_btc.FINANCE_SYMBOLS's comment.
     "MAUSDT": ["mastercard"],
     "METUSDT": ["metlife"],
     "PYPLUSDT": ["paypal"],

@@ -212,6 +212,7 @@ class BybitClient:
                     # fail to attach even when the base order itself fills).
                     "stop_loss": float(p.get("stopLoss") or 0),
                     "take_profit": float(p.get("takeProfit") or 0),
+                    "leverage": float(p.get("leverage") or 0),
                 }
         return None
 

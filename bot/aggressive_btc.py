@@ -1,5 +1,5 @@
 """Standalone aggressive scalp strategy, run independently per symbol (see
-AGGRESSIVE_CONFIGS below: 84 non-leveraged tokenized US stocks, split across
+AGGRESSIVE_CONFIGS below: 82 non-leveraged tokenized US stocks, split across
 four themed news pools -- SEMI_AI_CONFIGS for semiconductor/AI-infrastructure
 names, STOCK_CONFIGS for general software/consumer/space names,
 FINANCE_CONFIGS for banks/payments/brokers/insurers, and ENERGY_CONFIGS for
@@ -38,7 +38,7 @@ alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4% price
 move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math would
 predict -- SNXXUSDT was tried here and then removed from this module for
 exactly that unpredictability; SOXLUSDT never showed that specific symptom,
-but carries the same structural risk category). The 84 stock symbols
+but carries the same structural risk category). The 82 stock symbols
 actually in AGGRESSIVE_CONFIGS are DELIBERATELY NOT this kind of product --
 they're Bybit's 1x tokenized-stock perpetuals (e.g. AAPLUSDT tracks Apple's
 share price directly, no embedded multiplier). The original 38 were
@@ -52,7 +52,7 @@ rather than crashing). Check the dashboard after a deploy to see which
 actually came up; any missing one needs its ticker corrected against the
 Bybit app.
 
-Because all 84 symbols independently look for entry signals every tick, this
+Because all 82 symbols independently look for entry signals every tick, this
 module no longer caps how many can be open at once (removed by explicit
 decision -- an earlier version capped it at one LONG and one SHORT total,
 with a rotation mechanism to evict the cheapest-to-exit position once both
@@ -62,9 +62,9 @@ margin_pct_of_equity (50%) was kept at its original value rather than
 lowered to compensate -- get_available_balance_usdt()'s clamp in try_enter()
 is what actually bounds how many concurrent positions can size up before
 running out of free margin, same safety net as before, just without the
-capacity cap organizing how it gets used. With 84 symbols
+capacity cap organizing how it gets used. With 82 symbols
 each doing its own kline fetch every tick (POLL_SEC=30s, more than double
-the ~39 this module ran with before), one tick loop iteration now makes ~84
+the ~39 this module ran with before), one tick loop iteration now makes ~82
 sequential Bybit API calls before sleeping -- the loop degrades gracefully
 if that ever takes longer than POLL_SEC (tick()'s own sleep is clamped to a
 1s minimum, never negative), but this is meaningfully more per-loop API load
@@ -265,7 +265,7 @@ TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
 @dataclass
 class SymbolConfig:
-    """Per-symbol knobs. 84 instances of this (every SEMI_AI_CONFIGS/
+    """Per-symbol knobs. 82 instances of this (every SEMI_AI_CONFIGS/
     STOCK_CONFIGS/FINANCE_CONFIGS/ENERGY_CONFIGS entry, built by
     _make_stock_config) each drive one AggressiveBTCStrategy in production;
     a 86th instance, SOXL_CONFIG, is also defined but deliberately excluded
@@ -490,7 +490,11 @@ STOCK_SYMBOLS = [
     # pool's already-general finance/earnings feeds.
     "ACNUSDT", "ADBEUSDT", "AKAMUSDT", "CRMUSDT", "CRWDUSDT", "CSCOUSDT",
     "DDOGUSDT", "FLEXUSDT", "IBMUSDT", "INTUUSDT", "NOWUSDT", "PANWUSDT",
-    "PLTRUSDT", "NFLXUSDT", "RDDTUSDT", "TUSDT", "TTWOUSDT",
+    "PLTRUSDT", "NFLXUSDT", "RDDTUSDT", "TTWOUSDT",
+    # TUSDT (AT&T) deliberately excluded -- confirmed live (user checked the
+    # Bybit app) not to be a TradFi stock token there, almost certainly the
+    # same ticker-collision issue as CVXUSDT (Threshold Network's crypto
+    # token also uses "T").
 ]
 
 # Banks/payments/brokers/insurers (see _FINANCE_NEWS_CFG). BRKBUSDT is
@@ -498,8 +502,12 @@ STOCK_SYMBOLS = [
 # the "BRK.B" ticker (confirmed via /check-sp500-symbols).
 FINANCE_SYMBOLS = [
     "AXPUSDT", "BACUSDT", "BRKBUSDT", "BXUSDT", "CUSDT", "CFGUSDT",
-    "FISUSDT", "GSUSDT", "HOODUSDT", "IBKRUSDT", "JPMUSDT", "KEYUSDT",
+    "FISUSDT", "GSUSDT", "HOODUSDT", "IBKRUSDT", "JPMUSDT",
     "MAUSDT", "METUSDT", "PYPLUSDT", "VUSDT",
+    # KEYUSDT (KeyCorp) deliberately excluded -- confirmed live (user
+    # checked the Bybit app) not to be a TradFi stock token there, likely
+    # the same ticker-collision issue (SelfKey's crypto token also uses
+    # "KEY").
 ]
 
 # Oil/gas/energy majors (see _ENERGY_NEWS_CFG).
@@ -1118,6 +1126,58 @@ class AggressiveBTCStrategy:
             self.try_enter()
 
 
+# Shared by scan_configured_symbol_positions below with BOTH this module's
+# own _reconcile_orphaned_positions AND the dashboard (same process -- see
+# render_app.py), so the up-to-len(AGGRESSIVE_CONFIGS) individual API calls
+# that function makes only actually run once per TTL window no matter how
+# many callers ask for it.
+CONFIGURED_SYMBOL_POSITION_SCAN_CACHE_TTL_SEC = 90
+_configured_symbol_position_scan_cache: dict = {"ts": 0.0, "positions_by_symbol": {}}
+
+
+def scan_configured_symbol_positions(client: BybitClient) -> dict[str, dict]:
+    """Returns {symbol: position_dict} for every AGGRESSIVE_CONFIGS symbol
+    currently open on the exchange, found via a DIRECT per-symbol
+    get_position() query for each -- NOT via client.get_all_open_positions()'s
+    bulk settleCoin-based listing, which was observed live to miss a
+    genuinely open TradFi stock position entirely (confirmed directly on the
+    Bybit app: the position existed and had no SL/TP, yet never appeared in
+    that bulk call's results, in either the dashboard's manual-position
+    section or this module's own _reconcile_orphaned_positions -- even
+    though a direct per-symbol get_position() query for that exact symbol
+    works fine, as it does for every other stock symbol this module already
+    manages that way). Root cause unconfirmed -- this sandboxed development
+    session can't reach Bybit to inspect the raw bulk-list response and
+    compare it against the per-symbol one -- so rather than guess at a fix
+    to the bulk call itself, this works around it by trusting only direct
+    per-symbol queries across this module's own known, bounded symbol
+    universe.
+
+    Cached for CONFIGURED_SYMBOL_POSITION_SCAN_CACHE_TTL_SEC: this is up to
+    len(AGGRESSIVE_CONFIGS) individual API calls, too expensive to repeat on
+    every ~30s bot tick or every dashboard page load (20s auto-refresh).
+    Returns ALL configured symbols currently open, tracked or not -- callers
+    filter the result down to whichever symbols they personally care about
+    (e.g. "not already locally tracked"), which keeps this one cache usable
+    for every caller regardless of their own tracked-set differences.
+    """
+    now = time.time()
+    if now - _configured_symbol_position_scan_cache["ts"] < CONFIGURED_SYMBOL_POSITION_SCAN_CACHE_TTL_SEC:
+        return _configured_symbol_position_scan_cache["positions_by_symbol"]
+
+    found = {}
+    for symbol_cfg in AGGRESSIVE_CONFIGS:
+        try:
+            pos = client.get_position(symbol_cfg.symbol)
+        except BybitAPIError:
+            continue
+        if pos is not None:
+            found[symbol_cfg.symbol] = pos
+    _configured_symbol_position_scan_cache["positions_by_symbol"] = found
+    _configured_symbol_position_scan_cache["ts"] = now
+    return found
+
+
 def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifier: Notifier,
                                    log_dir: str, configs_by_symbol: dict[str, SymbolConfig]):
     """Finds any position that's actually open on the exchange, for one of
@@ -1158,6 +1218,17 @@ def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifi
             _reconcile_failure_notify_state["last_ts"] = now
             notifier.send(f"[aggressive_btc] 포지션 재연결 조회 실패 (반복되면 Render 로그 확인 필요): {exc}")
         return
+
+    # Supplement the bulk listing above with a direct per-symbol scan across
+    # this module's own configured universe -- see
+    # scan_configured_symbol_positions's docstring for the live-observed gap
+    # this works around (a genuinely open TradFi position that the bulk call
+    # never returned at all). Only adds a symbol the bulk call didn't
+    # already report; doesn't overwrite anything.
+    seen_symbols = {pos["symbol"] for pos in open_positions}
+    for symbol, pos in scan_configured_symbol_positions(client).items():
+        if symbol not in seen_symbols:
+            open_positions.append(pos)
 
     tracked = set(state.snapshot().get("trades", {}).keys())
     for pos in open_positions:

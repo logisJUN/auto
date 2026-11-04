@@ -32,7 +32,7 @@ from bot.state import StateStore
 
 # -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
 
-def test_aggressive_configs_has_84_distinct_stock_symbols_across_four_pools():
+def test_aggressive_configs_has_82_distinct_stock_symbols_across_four_pools():
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
     assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
     # SOXL_CONFIG is still DEFINED (used elsewhere as a representative test
@@ -41,19 +41,23 @@ def test_aggressive_configs_has_84_distinct_stock_symbols_across_four_pools():
     # category as SNXXUSDT, plus it can't participate in EDGAR filing
     # detection (a tokenized ETF files nothing with the SEC).
     assert "SOXLUSDT" not in symbols
-    # CVXUSDT excluded live -- confirmed to actually be Convex Finance's
-    # crypto token, not a Chevron stock token (see ENERGY_SYMBOLS's comment).
+    # CVXUSDT/TUSDT/KEYUSDT excluded live -- confirmed (user checked the
+    # Bybit app directly) that these are actually crypto tokens (Convex
+    # Finance, Threshold Network, SelfKey) coincidentally sharing a ticker
+    # with the intended stock, not real TradFi stock tokens.
     assert "CVXUSDT" not in symbols
-    assert len(symbols) == 84
-    assert len(set(symbols)) == 84  # no duplicates
+    assert "TUSDT" not in symbols
+    assert "KEYUSDT" not in symbols
+    assert len(symbols) == 82
+    assert len(set(symbols)) == 82  # no duplicates
 
     semi_ai_configs = aggressive_btc.SEMI_AI_CONFIGS
     stock_configs = aggressive_btc.STOCK_CONFIGS
     finance_configs = aggressive_btc.FINANCE_CONFIGS
     energy_configs = aggressive_btc.ENERGY_CONFIGS
     assert len(semi_ai_configs) == 30
-    assert len(stock_configs) == 35
-    assert len(finance_configs) == 16
+    assert len(stock_configs) == 34
+    assert len(finance_configs) == 15
     assert len(energy_configs) == 3
     assert "NVDAUSDT" in [sc.symbol for sc in semi_ai_configs]
     assert "AVGOUSDT" in [sc.symbol for sc in semi_ai_configs]  # moved from the general pool -- it's a chipmaker too
@@ -1356,6 +1360,18 @@ def _make_reconcile_env(tmp_path):
     state = StateStore(str(tmp_path / "aggressive_btc_state.json"))
     notifier = Notifier(None, None)
     client = MagicMock(spec=BybitClient)
+    # _reconcile_orphaned_positions also calls scan_configured_symbol_positions,
+    # which queries client.get_position() for every one of ~80 configured
+    # symbols -- default each to "no position" so these tests (which only
+    # care about get_all_open_positions()'s bulk result) aren't polluted by
+    # an unconfigured MagicMock return value standing in for a real position
+    # dict (that would make pos["stop_loss"] etc. blow up downstream).
+    client.get_position.return_value = None
+    # That scan result is cached at module level and shared across every
+    # caller/test process-wide -- reset it so an earlier test's (mocked)
+    # scan can't leak into this one.
+    aggressive_btc._configured_symbol_position_scan_cache["ts"] = 0.0
+    aggressive_btc._configured_symbol_position_scan_cache["positions_by_symbol"] = {}
     log_dir = str(tmp_path / "logs")
     configs_by_symbol = {sc.symbol: sc for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
     return client, state, notifier, log_dir, configs_by_symbol
@@ -1440,3 +1456,130 @@ def test_reconcile_failure_notification_is_throttled(tmp_path):
     _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
 
     notifier.send.assert_not_called()  # still within the throttle window
+
+
+# -- scan_configured_symbol_positions ---------------------------------------------------------
+
+def _reset_scan_cache():
+    aggressive_btc._configured_symbol_position_scan_cache["ts"] = 0.0
+    aggressive_btc._configured_symbol_position_scan_cache["positions_by_symbol"] = {}
+
+
+def test_scan_configured_symbol_positions_queries_every_configured_symbol():
+    _reset_scan_cache()
+    client = MagicMock(spec=BybitClient)
+    client.get_position.return_value = None
+
+    aggressive_btc.scan_configured_symbol_positions(client)
+
+    queried = {c.args[0] for c in client.get_position.call_args_list}
+    assert queried == {sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS}
+
+
+def test_scan_configured_symbol_positions_only_includes_symbols_with_an_open_position():
+    _reset_scan_cache()
+    client = MagicMock(spec=BybitClient)
+
+    def fake_get_position(symbol):
+        return _orphan(symbol) if symbol == "AAPLUSDT" else None
+
+    client.get_position.side_effect = fake_get_position
+
+    result = aggressive_btc.scan_configured_symbol_positions(client)
+
+    assert set(result.keys()) == {"AAPLUSDT"}
+
+
+def test_scan_configured_symbol_positions_tolerates_a_per_symbol_call_failing():
+    _reset_scan_cache()
+    client = MagicMock(spec=BybitClient)
+
+    def fake_get_position(symbol):
+        if symbol == "AAPLUSDT":
+            raise BybitAPIError("simulated failure")
+        return _orphan(symbol) if symbol == "MSFTUSDT" else None
+
+    client.get_position.side_effect = fake_get_position
+
+    result = aggressive_btc.scan_configured_symbol_positions(client)  # must not raise
+
+    assert set(result.keys()) == {"MSFTUSDT"}
+
+
+def test_scan_configured_symbol_positions_is_cached_across_calls(monkeypatch):
+    _reset_scan_cache()
+    client = MagicMock(spec=BybitClient)
+    client.get_position.return_value = None
+    now = time.time()
+    monkeypatch.setattr(aggressive_btc.time, "time", lambda: now)
+
+    aggressive_btc.scan_configured_symbol_positions(client)
+    call_count_after_first = client.get_position.call_count
+    aggressive_btc.scan_configured_symbol_positions(client)  # well within the TTL
+    call_count_after_second = client.get_position.call_count
+
+    assert call_count_after_first > 0
+    assert call_count_after_second == call_count_after_first  # no new calls -- served from cache
+
+
+def test_scan_configured_symbol_positions_refreshes_once_the_ttl_expires(monkeypatch):
+    _reset_scan_cache()
+    client = MagicMock(spec=BybitClient)
+    client.get_position.return_value = None
+    start = time.time()
+    current = {"t": start}
+    monkeypatch.setattr(aggressive_btc.time, "time", lambda: current["t"])
+
+    aggressive_btc.scan_configured_symbol_positions(client)
+    call_count_after_first = client.get_position.call_count
+
+    current["t"] = start + aggressive_btc.CONFIGURED_SYMBOL_POSITION_SCAN_CACHE_TTL_SEC + 1
+    aggressive_btc.scan_configured_symbol_positions(client)
+    call_count_after_second = client.get_position.call_count
+
+    assert call_count_after_second == call_count_after_first * 2
+
+
+def test_reconcile_adopts_a_position_found_only_via_the_supplementary_scan(tmp_path):
+    # Live-observed gap: a genuinely open TradFi position that
+    # get_all_open_positions()'s bulk listing never returned at all, even
+    # though a direct per-symbol get_position() call for it works fine --
+    # see scan_configured_symbol_positions's docstring. The bulk list is
+    # empty; the position is only found via the supplementary scan.
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    client.get_all_open_positions.return_value = []
+
+    def fake_get_position(symbol):
+        if symbol == "AAPLUSDT":
+            return _orphan("AAPLUSDT", stop_loss=190.0, take_profit=210.0)
+        return None
+
+    client.get_position.side_effect = fake_get_position
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    trade = state.get_trade("AAPLUSDT")
+    assert trade is not None
+    assert trade["current_sl"] == 190.0
+    assert trade["current_tp"] == 210.0
+
+
+def test_reconcile_prefers_the_bulk_listing_over_the_supplementary_scan_for_the_same_symbol(tmp_path):
+    # If a symbol appears in BOTH sources, the bulk listing's data wins --
+    # the supplementary scan only fills in symbols the bulk call missed.
+    client, state, notifier, log_dir, configs_by_symbol = _make_reconcile_env(tmp_path)
+    client.get_all_open_positions.return_value = [
+        _orphan("AAPLUSDT", stop_loss=190.0, take_profit=210.0, entry_price=200.0)
+    ]
+
+    def fake_get_position(symbol):
+        if symbol == "AAPLUSDT":
+            return _orphan("AAPLUSDT", stop_loss=1.0, take_profit=2.0, entry_price=999.0)
+        return None
+
+    client.get_position.side_effect = fake_get_position
+
+    _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
+
+    trade = state.get_trade("AAPLUSDT")
+    assert trade["entry_price"] == 200.0  # the bulk listing's value, not the scan's
