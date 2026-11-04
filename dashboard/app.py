@@ -550,7 +550,7 @@ TEMPLATE = """
     {% endif %}
     {% if positions %}
     <table>
-      <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>손익율</th><th>미실현손익</th></tr>
+      <tr><th>심볼</th><th>방향</th><th>레버리지</th><th>수량</th><th>진입가</th><th>현재가</th><th>SL</th><th>TP</th><th>미실현 손익율</th><th>미실현손익</th></tr>
       {% for p in positions %}
       <tr>
         <td>{{ p.symbol }}{% if p.manual %} <span class="small">(수동)</span>{% endif %}</td>
