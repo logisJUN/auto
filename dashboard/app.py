@@ -11,6 +11,8 @@ Run: python -m dashboard.app
 """
 from __future__ import annotations
 
+import concurrent.futures
+import json
 import logging
 import os
 import time
@@ -29,6 +31,7 @@ from bot.logger import compute_performance_summary, read_recent_decisions
 from bot.risk import stress_test
 from bot.state import StateStore
 from bot import aggressive_btc
+from sp500_tickers import SP500_TICKERS
 
 # Render's containers run in UTC -- time.localtime() would show every
 # timestamp in the dashboard 9 hours behind. Converting explicitly to KST
@@ -329,6 +332,57 @@ def _build_closed_trade_report(client: BybitClient, start_ms: int, end_ms: int, 
     return rows
 
 
+def _sp500_symbol_check_cache_path() -> str:
+    return os.path.join(os.getenv("DATA_DIR", "data"), "sp500_symbol_check.json")
+
+
+def _check_sp500_symbols(client: BybitClient) -> dict:
+    """Checks every S&P 500 ticker (see sp500_tickers.SP500_TICKERS, a static
+    2026-11-04 snapshot) as a candidate Bybit tokenized-stock-perpetual
+    symbol (ticker + "USDT", dots stripped for the 2 dual-class tickers like
+    BRK.B) via get_instrument_info(). PURE DISCOVERY -- this never touches
+    aggressive_btc.AGGRESSIVE_CONFIGS and never starts trading anything;
+    it's exactly the same existence check main()'s own startup validation
+    already does per-symbol, just run once here against the full S&P 500
+    candidate list instead of the 39 already configured.
+
+    Run concurrently (a small thread pool) rather than 503 sequential calls,
+    which would risk exceeding gunicorn's --timeout 120 on Render.
+    get_instrument_info()'s own cache is keyed per-symbol, so concurrent
+    calls on different symbols can't collide on the same cache slot.
+
+    Result is cached to disk (see _sp500_symbol_check_cache_path) since this
+    is a slow, rarely-changing check -- re-run only when the dashboard route
+    is asked to (force=True), not on every page load.
+    """
+    def check_one(ticker: str) -> dict:
+        symbol = ticker.replace(".", "") + "USDT"
+        try:
+            client.get_instrument_info(symbol)
+            return {"ticker": ticker, "symbol": symbol, "valid": True}
+        except BybitAPIError:
+            return {"ticker": ticker, "symbol": symbol, "valid": False}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(check_one, SP500_TICKERS))
+
+    results.sort(key=lambda r: r["ticker"])
+    valid = [r for r in results if r["valid"]]
+    invalid = [r for r in results if not r["valid"]]
+    report = {
+        "checked_at": time.time(), "total": len(results),
+        "valid": valid, "invalid": invalid,
+    }
+    try:
+        cache_path = _sp500_symbol_check_cache_path()
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+    except OSError:
+        logger.exception("dashboard: failed to cache sp500 symbol check results")
+    return report
+
+
 def _build_equity_curve(history: list[dict]) -> dict | None:
     """SVG polyline of cumulative realized PnL over time, in chronological order,
     from state.history (closed-trade summaries). Not a full tick-by-tick equity
@@ -441,6 +495,7 @@ TEMPLATE = """
 <body>
   <button id="copy-btn" class="copy-btn" onclick="copyReview()">📋 리뷰 복사</button>
   <a href="/history?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">📄 청산 이력 리포트</a>
+  <a href="/check-sp500-symbols?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">🔎 S&P500 심볼 확인</a>
   <div id="report">
   <h1>Bybit Futures Bot</h1>
   <span class="mode {{ 'testnet' if testnet else 'live' }}">{{ 'TESTNET (모의투자)' if testnet else 'LIVE (실거래)' }}</span>
@@ -1139,6 +1194,117 @@ def history_route():
     return render_template_string(
         _HISTORY_TEMPLATE, rows=rows, start=start_str, end=end_str,
         total_pnl=total_pnl, win_rate=win_rate, trade_count=len(rows),
+        token=request.args.get("token", ""),
+    )
+
+
+_SP500_CHECK_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S&P500 심볼 확인</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  h1 { font-size:1.2rem; margin-bottom:4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap:8px; }
+  .stat-label { font-size:0.75rem; color:#8b949e; }
+  .stat-value { font-size:1.1rem; font-weight:600; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  .run-btn, .copy-btn { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
+             padding:8px 14px; font-size:0.85rem; }
+  .copy-btn:active, .run-btn:active { background:#30363d; }
+  .chip { display:inline-block; padding:2px 8px; margin:2px; border-radius:6px; font-size:0.8rem; }
+  .chip.ok { background:#1a4d2e; color:#7ee787; }
+  a { color:#7ee787; }
+</style>
+</head>
+<body>
+  <h1>S&P500 종목 → Bybit 심볼 존재 확인</h1>
+  <div class="small" style="margin-bottom:10px;">S&P500 503개 티커 각각에 "USDT"를 붙여 Bybit에 실제로 상장돼 있는지 확인한 결과입니다. 이 페이지는 조회만 할 뿐, aggressive_btc 설정이나 실거래엔 아무 영향도 주지 않습니다.</div>
+
+  <form method="POST" action="/check-sp500-symbols?token={{ token }}" style="margin-bottom:10px;">
+    <button type="submit" class="run-btn">🔄 다시 확인 (503개, 1분 내외 소요)</button>
+  </form>
+
+  {% if report %}
+  <div id="report">
+  <div class="card">
+    <div class="grid">
+      <div><div class="stat-label">확인 시각</div><div class="stat-value small">{{ checked_at_str }}</div></div>
+      <div><div class="stat-label">전체</div><div class="stat-value">{{ report.total }}</div></div>
+      <div><div class="stat-label">존재함</div><div class="stat-value pnl-pos">{{ report.valid|length }}</div></div>
+      <div><div class="stat-label">없음</div><div class="stat-value pnl-neg">{{ report.invalid|length }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <button id="copy-btn" class="copy-btn" style="float:right;" onclick="copySp500Valid()">📋 존재하는 심볼만 복사</button>
+    <h2 style="font-size:1rem;">✅ Bybit에 존재함 ({{ report.valid|length }}개)</h2>
+    <div id="valid-list">
+      {% for r in report.valid %}<span class="chip ok">{{ r.symbol }}</span>{% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:1rem;">❌ Bybit에 없음 ({{ report.invalid|length }}개)</h2>
+    <div class="small">{{ report.invalid|map(attribute='symbol')|join(', ') }}</div>
+  </div>
+  </div>
+  {% else %}
+  <div class="card small">아직 확인한 적이 없어요. 위 버튼을 눌러 확인을 시작하세요.</div>
+  {% endif %}
+
+  <a href="/?token={{ token }}">← 대시보드로 돌아가기</a>
+
+  <script>
+    function copySp500Valid() {
+      const text = document.getElementById('valid-list').innerText.trim();
+      const btn = document.getElementById('copy-btn');
+      const original = btn.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = '복사됨!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      }).catch(() => {
+        btn.textContent = '복사 실패';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>
+"""
+
+
+@app.route("/check-sp500-symbols", methods=["GET", "POST"])
+def check_sp500_symbols_route():
+    """Discovery-only page: which of the S&P 500's 503 tickers (see
+    sp500_tickers.SP500_TICKERS) exist as a Bybit tokenized-stock-perpetual
+    symbol (ticker + "USDT"). GET shows the last cached result (instant);
+    POST re-runs the actual check (~503 concurrent API calls, up to roughly
+    a minute) and refreshes the cache. Never modifies aggressive_btc's
+    configuration or trading behavior -- purely answers "could this symbol
+    even be added" for a later, separate, deliberate config change.
+    """
+    _check_token()
+    if request.method == "POST":
+        report = _check_sp500_symbols(client)
+    else:
+        cache_path = _sp500_symbol_check_cache_path()
+        report = None
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    report = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                report = None
+
+    checked_at_str = _kst_str(report["checked_at"]) if report else None
+    return render_template_string(
+        _SP500_CHECK_TEMPLATE, report=report, checked_at_str=checked_at_str,
         token=request.args.get("token", ""),
     )
 
