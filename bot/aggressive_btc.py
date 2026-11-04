@@ -345,7 +345,17 @@ SOXL_CONFIG = SymbolConfig(
             "https://www.zdnet.com/news/rss.xml",                     # ZDNet
         ],
         "newsapi_query": "semiconductor OR chip OR chips OR Nvidia OR AMD OR TSMC OR Intel",
-        "refresh_minutes": 15,
+        # Lowered from 15 to 5 (and the same change made to every other
+        # news_cfg pool below) specifically to catch company/contract news
+        # faster -- this only shrinks the cache TTL between RSS re-fetches,
+        # it doesn't make the underlying feeds themselves publish any
+        # faster, so the realistic latency improvement is modest (RSS
+        # publish lag is still the bigger bottleneck). If NEWSAPI_KEY is set
+        # to a free-tier NewsAPI.org key, be aware that plan delays articles
+        # by 24 hours -- it adds nothing for same-day signals regardless of
+        # this refresh interval, and a paid plan is the only way to make
+        # NewsAPI itself fast.
+        "refresh_minutes": 5,
         "lookback_hours": 12,
         "max_articles": 60,
     },
@@ -381,7 +391,7 @@ _STOCK_NEWS_CFG = {
         "https://news.google.com/rss/search?q=stock+market+earnings&hl=en-US&gl=US&ceid=US:en",
     ],
     "newsapi_query": "stock market OR earnings OR Nasdaq OR S%26P 500",
-    "refresh_minutes": 15,
+    "refresh_minutes": 5,
     "lookback_hours": 12,
     "max_articles": 80,  # higher than SOXL's 60 -- one shared pool now needs to cover 10 different companies
 }
@@ -407,7 +417,7 @@ _SEMI_AI_NEWS_CFG = {
         "https://news.google.com/rss/search?q=semiconductor+OR+%22AI+infrastructure%22+OR+%22data+center%22+OR+%22AI+chips%22&hl=en-US&gl=US&ceid=US:en",
     ],
     "newsapi_query": "semiconductor OR \"AI infrastructure\" OR \"data center\" OR \"AI chips\" OR networking",
-    "refresh_minutes": 15,
+    "refresh_minutes": 5,
     "lookback_hours": 12,
     "max_articles": 100,  # shared by 20 companies -- needs more headroom than the SOXL-only pool
 }
@@ -427,7 +437,7 @@ _FINANCE_NEWS_CFG = {
         "https://news.google.com/rss/search?q=bank+earnings+OR+%22federal+reserve%22+OR+%22interest+rates%22+OR+fintech&hl=en-US&gl=US&ceid=US:en",
     ],
     "newsapi_query": "bank earnings OR \"federal reserve\" OR \"interest rates\" OR fintech OR payments",
-    "refresh_minutes": 15,
+    "refresh_minutes": 5,
     "lookback_hours": 12,
     "max_articles": 90,  # shared by 16 companies
 }
@@ -446,7 +456,7 @@ _ENERGY_NEWS_CFG = {
         "https://news.google.com/rss/search?q=oil+prices+OR+OPEC+OR+crude+OR+natural+gas&hl=en-US&gl=US&ceid=US:en",
     ],
     "newsapi_query": "oil prices OR OPEC OR crude OR \"natural gas\" OR energy sector",
-    "refresh_minutes": 15,
+    "refresh_minutes": 5,
     "lookback_hours": 12,
     "max_articles": 60,  # shared by just 4 companies
 }
