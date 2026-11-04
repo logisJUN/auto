@@ -32,21 +32,30 @@ from bot.state import StateStore
 
 # -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
 
-def test_aggressive_configs_has_soxl_plus_38_distinct_stock_symbols_across_two_pools():
+def test_aggressive_configs_has_soxl_plus_85_distinct_stock_symbols_across_four_pools():
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
     assert symbols[0] == "SOXLUSDT"
     assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
-    assert len(symbols) == 39
-    assert len(set(symbols)) == 39  # no duplicates
+    assert len(symbols) == 86
+    assert len(set(symbols)) == 86  # no duplicates
 
     semi_ai_configs = aggressive_btc.SEMI_AI_CONFIGS
     stock_configs = aggressive_btc.STOCK_CONFIGS
-    assert len(semi_ai_configs) == 20
-    assert len(stock_configs) == 18
+    finance_configs = aggressive_btc.FINANCE_CONFIGS
+    energy_configs = aggressive_btc.ENERGY_CONFIGS
+    assert len(semi_ai_configs) == 30
+    assert len(stock_configs) == 35
+    assert len(finance_configs) == 16
+    assert len(energy_configs) == 4
     assert "NVDAUSDT" in [sc.symbol for sc in semi_ai_configs]
     assert "AVGOUSDT" in [sc.symbol for sc in semi_ai_configs]  # moved from the general pool -- it's a chipmaker too
+    assert "QCOMUSDT" in [sc.symbol for sc in semi_ai_configs]  # S&P500 cross-check addition
+    assert "NFLXUSDT" in [sc.symbol for sc in stock_configs]  # S&P500 cross-check addition
+    assert "JPMUSDT" in [sc.symbol for sc in finance_configs]
+    assert "XOMUSDT" in [sc.symbol for sc in energy_configs]
 
-    for sc in semi_ai_configs + stock_configs:
+    all_pools = semi_ai_configs + stock_configs + finance_configs + energy_configs
+    for sc in all_pools:
         if sc.symbol in aggressive_btc.THIN_LIQUIDITY_SYMBOLS:
             continue  # checked separately below -- lowered leverage range
         # No embedded leverage on these (unlike SOXLUSDT) -- allowed a higher
@@ -60,18 +69,19 @@ def test_aggressive_configs_has_soxl_plus_38_distinct_stock_symbols_across_two_p
     # the configured -5% SL live -- lowered to SOXLUSDT's own [6x,10x]/10x
     # range so the same %-price slippage does less ROI% damage.
     for sym in aggressive_btc.THIN_LIQUIDITY_SYMBOLS:
-        sc = next(sc for sc in semi_ai_configs + stock_configs if sc.symbol == sym)
+        sc = next(sc for sc in all_pools if sc.symbol == sym)
         assert sc.min_leverage == 6.0
         assert sc.max_leverage == 10.0
         assert sc.leverage_hard_cap == 10.0
 
-    # The two pools use genuinely different news_cfg objects (separate RSS
+    # The four pools use genuinely different news_cfg objects (separate RSS
     # pools/NewsSignal instances), not just coincidentally-equal dicts.
-    semi_ai_news_ids = {id(sc.news_cfg) for sc in semi_ai_configs}
-    stock_news_ids = {id(sc.news_cfg) for sc in stock_configs}
-    assert len(semi_ai_news_ids) == 1
-    assert len(stock_news_ids) == 1
-    assert semi_ai_news_ids != stock_news_ids
+    news_ids_per_pool = [
+        {id(sc.news_cfg) for sc in pool} for pool in (semi_ai_configs, stock_configs, finance_configs, energy_configs)
+    ]
+    for ids in news_ids_per_pool:
+        assert len(ids) == 1  # each pool shares ONE news_cfg object across its own symbols
+    assert len({next(iter(ids)) for ids in news_ids_per_pool}) == 4  # all four pools distinct from each other
 
 
 # -- compute_leverage ---------------------------------------------------------

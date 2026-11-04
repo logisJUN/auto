@@ -1,7 +1,14 @@
 """Standalone aggressive scalp strategy, run independently per symbol (see
-AGGRESSIVE_CONFIGS below: SOXLUSDT plus 38 non-leveraged tokenized US stocks,
-split across two themed news pools -- SEMI_AI_CONFIGS for semiconductor/
-AI-infrastructure names, STOCK_CONFIGS for everything else).
+AGGRESSIVE_CONFIGS below: SOXLUSDT plus 85 non-leveraged tokenized US stocks,
+split across four themed news pools -- SEMI_AI_CONFIGS for semiconductor/
+AI-infrastructure names, STOCK_CONFIGS for general software/consumer/space
+names, FINANCE_CONFIGS for banks/payments/brokers/insurers, and
+ENERGY_CONFIGS for oil/gas majors. The 47 FINANCE_CONFIGS/ENERGY_CONFIGS/
+newer SEMI_AI_CONFIGS/STOCK_CONFIGS symbols were added via a cross-check of
+S&P 500 constituents against Bybit's actual tokenized-stock listing (see
+dashboard/app.py's /check-sp500-symbols route) -- restricted to the
+financials/IT/communication-services/energy/semiconductor sectors by
+explicit choice, not the full S&P 500 candidate pool that check turned up.
 
 Deliberately SEPARATE from bot/strategy.py (the main, conservative
 multi-symbol system this whole codebase was built around) -- different risk
@@ -12,8 +19,9 @@ All configured symbols share this one state file (StateStore's trades/
 skip_reasons are already keyed by symbol) and one Bybit client/notifier;
 each gets its own SymbolConfig (leverage range, weights, etc), but
 PolymarketSignal/NewsSignal instances are shared across symbols whose cfg
-dicts are identical (see main()'s _signal_cache) so the ~20 symbols in each
-stock news pool don't each independently re-fetch the same RSS feeds.
+dicts are identical (see main()'s _signal_cache) so the symbols in each of
+the four stock news pools don't each independently re-fetch the same RSS
+feeds.
 
 SOXLUSDT is NOT a plain coin -- it's a tokenized 3x leveraged semiconductor-
 index ETF. The main bot's config.yaml excludes it from its own universe scan
@@ -22,20 +30,21 @@ token has been observed live diverging from what entry/exit price * qty *
 leverage alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4%
 price move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math
 would predict -- SNXXUSDT was tried here and then removed from this module
-for exactly that unpredictability). The 38 stock symbols below are
+for exactly that unpredictability). The 85 stock symbols below are
 DELIBERATELY NOT this kind of product -- they're Bybit's 1x tokenized-stock
 perpetuals (e.g. AAPLUSDT tracks Apple's share price directly, no embedded
 multiplier), chosen specifically to avoid the embedded-leverage risk that
-made SNXXUSDT's behavior unreliable. The first 10 were confirmed directly
-against screenshots of Bybit's own listing; the other 28 were not (this
-sandboxed session can't reach api.bybit.com itself to verify) -- see
-main()'s startup validation, which queries get_instrument_info() for every
-configured symbol and skips (with a logged warning + notifier message,
-rather than crashing) any ticker that turns out not to exist or not be
-tradable. Check the dashboard after a deploy to see which actually came up;
-any missing one needs its ticker corrected against the Bybit app.
+made SNXXUSDT's behavior unreliable. The original 38 were verified the slow
+way (screenshots, then main()'s own startup-validation skip-on-failure); the
+47 newer ones were verified directly via /check-sp500-symbols's live
+get_instrument_info() check before being added, so they should all already
+be tradable -- main()'s startup validation still runs as the final backstop
+regardless (skips, with a logged warning + notifier message, any ticker that
+turns out not to exist or not be tradable rather than crashing). Check the
+dashboard after a deploy to see which actually came up; any missing one
+needs its ticker corrected against the Bybit app.
 
-Because all 39 symbols independently look for entry signals every tick, this
+Because all 86 symbols independently look for entry signals every tick, this
 module enforces a capacity cap of at most ONE LONG and ONE SHORT open at a
 time across all of them -- two concurrent positions total, never two on the
 same side (see try_enter()'s check of state.open_trade_sides()). A deliberate
@@ -44,11 +53,14 @@ minimum margin at once) so the existing 50%-of-equity-per-trade sizing never
 has to be shared or diluted across more than two concurrent positions -- in
 the worst case (a long and a short both open at once) that's up to ~100% of
 equity committed as margin, which get_available_balance_usdt()'s clamp in
-try_enter() still protects against literally overdrawing. With 39 symbols each doing
-its own kline fetch every tick (POLL_SEC=30s), one tick loop iteration now
-makes ~39 sequential Bybit API calls before sleeping -- still fine against
-Bybit's public rate limits and POLL_SEC's own headroom, but worth knowing if
-the loop is ever observed falling behind real time.
+try_enter() still protects against literally overdrawing. With 86 symbols
+each doing its own kline fetch every tick (POLL_SEC=30s, more than double
+the ~39 this module ran with before), one tick loop iteration now makes ~86
+sequential Bybit API calls before sleeping -- the loop degrades gracefully
+if that ever takes longer than POLL_SEC (tick()'s own sleep is clamped to a
+1s minimum, never negative), but this is meaningfully more per-loop API load
+than previously measured as fine, so it's worth actually watching Render's
+logs for how long a loop iteration takes after this deploy.
 
 Design, as specified (per symbol, via SymbolConfig):
   1. 1-hour candles, target +12% ROI (on margin) per trade.
@@ -272,11 +284,11 @@ TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
 @dataclass
 class SymbolConfig:
-    """Per-symbol knobs. 39 instances of this (SOXL_CONFIG plus every
-    SEMI_AI_CONFIGS/STOCK_CONFIGS entry, built by _make_stock_config) each
-    drive one AggressiveBTCStrategy; everything else about the strategy's
-    mechanics (hourly cutoff, poll interval, TP/SL formula) is shared via the
-    module-level constants above.
+    """Per-symbol knobs. 86 instances of this (SOXL_CONFIG plus every
+    SEMI_AI_CONFIGS/STOCK_CONFIGS/FINANCE_CONFIGS/ENERGY_CONFIGS entry, built
+    by _make_stock_config) each drive one AggressiveBTCStrategy; everything
+    else about the strategy's mechanics (hourly cutoff, poll interval, TP/SL
+    formula) is shared via the module-level constants above.
     """
     symbol: str
     target_pct: float = 12.0               # take-profit, % ROI on margin
@@ -400,30 +412,78 @@ _SEMI_AI_NEWS_CFG = {
     "max_articles": 100,  # shared by 20 companies -- needs more headroom than the SOXL-only pool
 }
 
+# Third themed news pool: banks/payments/brokers/insurers (FINANCE_SYMBOLS
+# below) move on Fed policy, rate decisions, and earnings in a way general
+# tech-market feeds cover only incidentally -- a dedicated finance-news feed
+# set surfaces that reliably instead of relying on it showing up by chance
+# in _STOCK_NEWS_CFG's more general mix.
+_FINANCE_NEWS_CFG = {
+    "feeds": [
+        "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # CNBC Markets
+        "https://www.investing.com/rss/news_25.rss",              # Investing.com stock market news
+        "https://www.marketwatch.com/rss/topstories",             # MarketWatch top stories
+        "https://www.benzinga.com/feed",                          # Benzinga market news
+        "https://finance.yahoo.com/news/rssindex",                # Yahoo Finance
+        "https://news.google.com/rss/search?q=bank+earnings+OR+%22federal+reserve%22+OR+%22interest+rates%22+OR+fintech&hl=en-US&gl=US&ceid=US:en",
+    ],
+    "newsapi_query": "bank earnings OR \"federal reserve\" OR \"interest rates\" OR fintech OR payments",
+    "refresh_minutes": 15,
+    "lookback_hours": 12,
+    "max_articles": 90,  # shared by 16 companies
+}
+
+# Fourth themed news pool: oil/gas/energy majors (ENERGY_SYMBOLS below) move
+# on crude prices, OPEC+ decisions, and geopolitical supply events -- none of
+# which show up reliably in tech-earnings-skewed general finance feeds, so
+# this is the one pool here with feeds genuinely outside this module's
+# previous (tech-heavy) coverage.
+_ENERGY_NEWS_CFG = {
+    "feeds": [
+        "https://www.investing.com/rss/news_301.rss",             # Investing.com commodities/energy news
+        "https://www.marketwatch.com/rss/topstories",             # MarketWatch top stories
+        "https://www.benzinga.com/feed",                          # Benzinga market news
+        "https://finance.yahoo.com/news/rssindex",                # Yahoo Finance
+        "https://news.google.com/rss/search?q=oil+prices+OR+OPEC+OR+crude+OR+natural+gas&hl=en-US&gl=US&ceid=US:en",
+    ],
+    "newsapi_query": "oil prices OR OPEC OR crude OR \"natural gas\" OR energy sector",
+    "refresh_minutes": 15,
+    "lookback_hours": 12,
+    "max_articles": 60,  # shared by just 4 companies
+}
+
 # Bybit's 1x tokenized-stock USDT perpetuals (TradFi > Futures > Stocks in
 # the app) -- the first 10 (AAPL/TSLA/NVDA/AMZN/GOOGL/META/MSFT/AVGO/COIN/
-# MSTR) were confirmed directly against screenshots of that listing; the 28
-# below were supplied directly rather than screenshotted, so they're NOT
-# independently confirmed the same way (this sandboxed session still can't
-# reach api.bybit.com to check itself). main()'s startup validation drops
-# any symbol that turns out not to be tradable rather than crashing, as a
-# backstop against a wrong/outdated ticker among these. Two names differ
-# from the obvious guess that I know of: Bybit lists TSMC as TSMUSDT (not
-# TSMCUSDT, used correctly below) and AMD's stock token as AMDSTOCKUSDT (not
-# AMDUSDT -- not used here, but worth knowing if AMD gets added later).
+# MSTR) were confirmed directly against screenshots of that listing; the next
+# 28 were supplied directly rather than screenshotted, so they were NOT
+# independently confirmed the same way at the time (this sandboxed session
+# still can't reach api.bybit.com to check itself) -- main()'s startup
+# validation was the only backstop for those. The newest 47 (FINANCE_SYMBOLS/
+# ENERGY_SYMBOLS plus the SEMI_AI_SYMBOLS/STOCK_SYMBOLS additions below) WERE
+# verified live via /check-sp500-symbols before being added, so they're on
+# firmer footing. Two names differ from the obvious guess that I know of:
+# Bybit lists TSMC as TSMUSDT (not TSMCUSDT, used correctly below) and AMD's
+# stock token as AMDSTOCKUSDT (not AMDUSDT -- not used here, but worth
+# knowing if AMD gets added later).
 #
-# Split into two groups so the "테마에 대한 뉴스" (theme-relevant news) request
-# gets two differently-tuned news pools rather than one generic one:
+# Split into four groups so the "테마에 대한 뉴스" (theme-relevant news) request
+# gets differently-tuned news pools rather than one generic one:
 # semiconductor/AI-infrastructure names (their own vocabulary -- chips, data
-# centers, export controls -- that general market feeds rarely use) vs.
-# everything else (big tech/software, space/defense, consumer -- all
-# large/well-covered names that show up reliably in general finance
-# headlines already).
+# centers, export controls -- that general market feeds rarely use), general
+# software/consumer/space/communication-services names (large/well-covered,
+# show up reliably in general finance headlines already), banks/payments/
+# brokers/insurers (own vocabulary -- Fed policy, rate decisions), and
+# oil/gas majors (own vocabulary -- crude prices, OPEC+, supply events) --
+# see FINANCE_SYMBOLS/ENERGY_SYMBOLS below.
 SEMI_AI_SYMBOLS = [
     "NVDAUSDT", "AVGOUSDT",  # moved here from the general pool -- both ARE semiconductor companies
     "TSMUSDT", "MUUSDT", "INTCUSDT", "AMATUSDT", "KLACUSDT", "LRCXUSDT",
     "MRVLUSDT", "ADIUSDT", "CRDOUSDT", "COHRUSDT", "LITEUSDT", "CIENUSDT",
     "ALABUSDT", "AEHRUSDT", "SMCIUSDT", "DELLUSDT", "HPEUSDT", "ANETUSDT",
+    # Added from the S&P500-vs-Bybit cross-check (see /check-sp500-symbols) --
+    # semiconductor/chip-equipment/storage names that fit this pool's
+    # vocabulary better than the general STOCK_SYMBOLS pool below.
+    "GLWUSDT", "ONUSDT", "QUSDT", "QCOMUSDT", "SNDKUSDT", "SNPSUSDT",
+    "STXUSDT", "TERUSDT", "TXNUSDT", "WDCUSDT",
 ]
 
 STOCK_SYMBOLS = [
@@ -431,7 +491,25 @@ STOCK_SYMBOLS = [
     "COINUSDT", "MSTRUSDT", "ORCLUSDT",
     "RKLBUSDT", "RDWUSDT", "RIVNUSDT", "DKNGUSDT", "DJTUSDT",
     "COSTUSDT", "HDUSDT", "MNSTUSDT", "SONYUSDT",
+    # Added from the S&P500-vs-Bybit cross-check -- general software/
+    # enterprise-tech and communication-services names, well-covered by this
+    # pool's already-general finance/earnings feeds.
+    "ACNUSDT", "ADBEUSDT", "AKAMUSDT", "CRMUSDT", "CRWDUSDT", "CSCOUSDT",
+    "DDOGUSDT", "FLEXUSDT", "IBMUSDT", "INTUUSDT", "NOWUSDT", "PANWUSDT",
+    "PLTRUSDT", "NFLXUSDT", "RDDTUSDT", "TUSDT", "TTWOUSDT",
 ]
+
+# Banks/payments/brokers/insurers (see _FINANCE_NEWS_CFG). BRKBUSDT is
+# Berkshire Hathaway's Class B shares -- Bybit's symbol strips the dot from
+# the "BRK.B" ticker (confirmed via /check-sp500-symbols).
+FINANCE_SYMBOLS = [
+    "AXPUSDT", "BACUSDT", "BRKBUSDT", "BXUSDT", "CUSDT", "CFGUSDT",
+    "FISUSDT", "GSUSDT", "HOODUSDT", "IBKRUSDT", "JPMUSDT", "KEYUSDT",
+    "MAUSDT", "METUSDT", "PYPLUSDT", "VUSDT",
+]
+
+# Oil/gas/energy majors (see _ENERGY_NEWS_CFG).
+ENERGY_SYMBOLS = ["CVXUSDT", "EQTUSDT", "OXYUSDT", "XOMUSDT"]
 
 
 # Symbols that have repeatedly shown an actual closed ROI% far past their
@@ -473,8 +551,12 @@ def _make_stock_config(sym: str, news_cfg: dict) -> SymbolConfig:
 
 SEMI_AI_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _SEMI_AI_NEWS_CFG) for sym in SEMI_AI_SYMBOLS]
 STOCK_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _STOCK_NEWS_CFG) for sym in STOCK_SYMBOLS]
+FINANCE_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _FINANCE_NEWS_CFG) for sym in FINANCE_SYMBOLS]
+ENERGY_CONFIGS: list[SymbolConfig] = [_make_stock_config(sym, _ENERGY_NEWS_CFG) for sym in ENERGY_SYMBOLS]
 
-AGGRESSIVE_CONFIGS: list[SymbolConfig] = [SOXL_CONFIG] + SEMI_AI_CONFIGS + STOCK_CONFIGS
+AGGRESSIVE_CONFIGS: list[SymbolConfig] = (
+    [SOXL_CONFIG] + SEMI_AI_CONFIGS + STOCK_CONFIGS + FINANCE_CONFIGS + ENERGY_CONFIGS
+)
 
 # Backward-compat alias: the strategy was originally SOXLUSDT-only, and a few
 # places (dashboard's default /backtest symbol, old references) still want
@@ -783,7 +865,7 @@ class AggressiveBTCStrategy:
             return
 
         # Capacity cap: at most one LONG and one SHORT open at a time across
-        # all 39 symbols (see module docstring).
+        # all configured symbols (see module docstring).
         existing_sides = self.state.open_trade_sides()
         if len(existing_sides) >= 2:
             # Both sides already taken -- rather than just skip this

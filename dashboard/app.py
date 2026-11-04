@@ -80,7 +80,7 @@ _AGG_EXCHANGE_PNL_CACHE_TTL_SEC = 120
 # window would instead start dropping October's early trades off the back
 # once it's November). get_closed_pnl_since() chunks the gap between this
 # and now into 7-day windows itself, so this being a long-fixed date is
-# cheap (still ONE fetch per cache refresh, covering all 39 symbols -- see
+# cheap (still ONE fetch per cache refresh, covering all configured symbols -- see
 # _agg_exchange_pnl_cache below) -- it just means more windows, hence more
 # calls in that one fetch, as this strategy accumulates more running time.
 AGGRESSIVE_BTC_PNL_START = datetime(2026, 10, 1, tzinfo=KST)
@@ -151,7 +151,7 @@ def _build_watchlist(client: BybitClient, symbols: list[str], trades: dict, skip
 
 def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
     """One view per symbol aggressive_btc.py is currently configured to trade
-    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 38 stock tokens) --
+    (see aggressive_btc.AGGRESSIVE_CONFIGS: SOXLUSDT plus 85 stock tokens) --
     empty list if that module has never run (no state file yet), so this
     section simply doesn't render rather than showing an empty shell forever.
     All configured symbols share ONE state file (StateStore's trades/history/
@@ -253,7 +253,7 @@ def _build_aggressive_btc_views(client: BybitClient) -> list[dict]:
         if position is None and trade_count == 0 and skip is None:
             # Never traded, no skip reason recorded yet -- most likely still
             # mid-warmup right after a redeploy. Skipping it here (rather
-            # than rendering an empty card for all 39 symbols immediately)
+            # than rendering an empty card for every configured symbol immediately)
             # keeps the page from being dominated by blank stock rows on a
             # fresh start; it appears as soon as it has ANY data.
             continue
@@ -689,7 +689,7 @@ TEMPLATE = """
 
   {% if aggressive_list %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, 39개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
+    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, {{ agg_symbol_count }}개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
     <div class="grid" style="margin-bottom:10px;">
       <div><div class="stat-label">누적손익(10/01~) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
       <div><div class="stat-label">자동 진입</div><div class="stat-value">
@@ -842,8 +842,9 @@ _STRONG_SCORE_HIGHLIGHT_THRESHOLD = 0.4
 def _mark_extreme_scores(decisions: list[dict]) -> None:
     """Flags (in place) the signal_check row with the single LOWEST score
     (most negative -- red/bold) and the one with the single HIGHEST score
-    (most positive -- blue/bold). With 39 symbols' worth of "관망" rows in
-    the log, these two are the current extremes, worth drawing the eye to.
+    (most positive -- blue/bold). With every configured symbol's worth of
+    "관망" rows in the log, these two are the current extremes, worth
+    drawing the eye to.
     Forced distinct (the lowest pick is excluded before picking the
     highest) so a one-row list can't get claimed by both.
 
@@ -872,7 +873,7 @@ def _mark_extreme_scores(decisions: list[dict]) -> None:
 
 def _decision_event_label(d: dict) -> str:
     """What the "이벤트" column shows. signal_check rows show the symbol
-    (e.g. "METAUSDT") instead of the literal event name -- with 39 symbols
+    (e.g. "METAUSDT") instead of the literal event name -- with many symbols
     sharing this log, "signal_check" in every row told you nothing, while the
     symbol is exactly what you'd scan the column for. Other event types keep
     showing the literal event name: entry/exit/adjust are already symbol-
@@ -1535,6 +1536,7 @@ def index():
     aggressive_list = _build_aggressive_btc_views(client)
     aggressive_totals = {"cumulative_pnl": sum(a["cumulative_pnl"] for a in aggressive_list)}
     aggressive_paused = os.path.exists(aggressive_btc.pause_flag_path())
+    agg_symbol_count = len(aggressive_btc.AGGRESSIVE_CONFIGS)
 
     return render_template_string(
         TEMPLATE,
@@ -1560,6 +1562,7 @@ def index():
         aggressive_list=aggressive_list,
         aggressive_totals=aggressive_totals,
         aggressive_paused=aggressive_paused,
+        agg_symbol_count=agg_symbol_count,
     )
 
 

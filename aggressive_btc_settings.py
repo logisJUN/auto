@@ -3,8 +3,8 @@ strategy logic. Currently just the one: ENTRY_THRESHOLD.
 """
 
 # |blended score| needed to enter a position, in either direction, for every
-# configured aggressive_btc symbol (SOXLUSDT + all 38 stock tokens) -- change
-# this one number to retune entry sensitivity across all 39 at once.
+# configured aggressive_btc symbol (SOXLUSDT + all 85 stock tokens) -- change
+# this one number to retune entry sensitivity across all 86 at once.
 # Lower = trades more often on weaker signals, so win rate/trade quality can
 # drop. Higher = trades less often but only on stronger ones.
 #
