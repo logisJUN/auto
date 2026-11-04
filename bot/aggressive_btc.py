@@ -1,5 +1,5 @@
 """Standalone aggressive scalp strategy, run independently per symbol (see
-AGGRESSIVE_CONFIGS below: 85 non-leveraged tokenized US stocks, split across
+AGGRESSIVE_CONFIGS below: 84 non-leveraged tokenized US stocks, split across
 four themed news pools -- SEMI_AI_CONFIGS for semiconductor/AI-infrastructure
 names, STOCK_CONFIGS for general software/consumer/space names,
 FINANCE_CONFIGS for banks/payments/brokers/insurers, and ENERGY_CONFIGS for
@@ -38,7 +38,7 @@ alone would imply (a related tokenized ETF, SNXXUSDT, showed a 2.4% price
 move closing at +48% PNL on a ~7x position vs. the ~16.8% plain math would
 predict -- SNXXUSDT was tried here and then removed from this module for
 exactly that unpredictability; SOXLUSDT never showed that specific symptom,
-but carries the same structural risk category). The 85 stock symbols
+but carries the same structural risk category). The 84 stock symbols
 actually in AGGRESSIVE_CONFIGS are DELIBERATELY NOT this kind of product --
 they're Bybit's 1x tokenized-stock perpetuals (e.g. AAPLUSDT tracks Apple's
 share price directly, no embedded multiplier). The original 38 were
@@ -52,7 +52,7 @@ rather than crashing). Check the dashboard after a deploy to see which
 actually came up; any missing one needs its ticker corrected against the
 Bybit app.
 
-Because all 85 symbols independently look for entry signals every tick, this
+Because all 84 symbols independently look for entry signals every tick, this
 module no longer caps how many can be open at once (removed by explicit
 decision -- an earlier version capped it at one LONG and one SHORT total,
 with a rotation mechanism to evict the cheapest-to-exit position once both
@@ -62,9 +62,9 @@ margin_pct_of_equity (50%) was kept at its original value rather than
 lowered to compensate -- get_available_balance_usdt()'s clamp in try_enter()
 is what actually bounds how many concurrent positions can size up before
 running out of free margin, same safety net as before, just without the
-capacity cap organizing how it gets used. With 85 symbols
+capacity cap organizing how it gets used. With 84 symbols
 each doing its own kline fetch every tick (POLL_SEC=30s, more than double
-the ~39 this module ran with before), one tick loop iteration now makes ~85
+the ~39 this module ran with before), one tick loop iteration now makes ~84
 sequential Bybit API calls before sleeping -- the loop degrades gracefully
 if that ever takes longer than POLL_SEC (tick()'s own sleep is clamped to a
 1s minimum, never negative), but this is meaningfully more per-loop API load
@@ -265,7 +265,7 @@ TECH_CFG = {"ema_fast": 12, "ema_slow": 26, "rsi_period": 14, "atr_period": 14}
 
 @dataclass
 class SymbolConfig:
-    """Per-symbol knobs. 85 instances of this (every SEMI_AI_CONFIGS/
+    """Per-symbol knobs. 84 instances of this (every SEMI_AI_CONFIGS/
     STOCK_CONFIGS/FINANCE_CONFIGS/ENERGY_CONFIGS entry, built by
     _make_stock_config) each drive one AggressiveBTCStrategy in production;
     a 86th instance, SOXL_CONFIG, is also defined but deliberately excluded
@@ -503,7 +503,19 @@ FINANCE_SYMBOLS = [
 ]
 
 # Oil/gas/energy majors (see _ENERGY_NEWS_CFG).
-ENERGY_SYMBOLS = ["CVXUSDT", "EQTUSDT", "OXYUSDT", "XOMUSDT"]
+# CVXUSDT deliberately excluded -- confirmed live (user checked the Bybit
+# app) that this symbol is actually Convex Finance's CRYPTO token (ticker
+# also "CVX"), not a Chevron stock token, even though get_instrument_info()
+# happily returns data for it (same "linear" category as the real TradFi
+# stock tokens, so a coincidentally-matching crypto ticker is
+# indistinguishable from the real thing using only that existence check --
+# see /check-sp500-symbols's own docstring/caveats, which this invalidates
+# for any ticker that also happens to be a listed crypto symbol). Every
+# other configured symbol's existence was verified the same, now-known-
+# insufficient way; worth re-checking the full list directly against the
+# Bybit app's TradFi > Futures > Stocks tab rather than trusting this check
+# alone for any ticker short enough to plausibly collide with a real coin.
+ENERGY_SYMBOLS = ["EQTUSDT", "OXYUSDT", "XOMUSDT"]
 
 
 # Symbols that have repeatedly shown an actual closed ROI% far past their

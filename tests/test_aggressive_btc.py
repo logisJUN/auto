@@ -32,7 +32,7 @@ from bot.state import StateStore
 
 # -- AGGRESSIVE_CONFIGS ---------------------------------------------------------
 
-def test_aggressive_configs_has_85_distinct_stock_symbols_across_four_pools():
+def test_aggressive_configs_has_84_distinct_stock_symbols_across_four_pools():
     symbols = [sc.symbol for sc in aggressive_btc.AGGRESSIVE_CONFIGS]
     assert "SNXXUSDT" not in symbols  # removed -- unpredictable embedded-leverage PNL
     # SOXL_CONFIG is still DEFINED (used elsewhere as a representative test
@@ -41,8 +41,11 @@ def test_aggressive_configs_has_85_distinct_stock_symbols_across_four_pools():
     # category as SNXXUSDT, plus it can't participate in EDGAR filing
     # detection (a tokenized ETF files nothing with the SEC).
     assert "SOXLUSDT" not in symbols
-    assert len(symbols) == 85
-    assert len(set(symbols)) == 85  # no duplicates
+    # CVXUSDT excluded live -- confirmed to actually be Convex Finance's
+    # crypto token, not a Chevron stock token (see ENERGY_SYMBOLS's comment).
+    assert "CVXUSDT" not in symbols
+    assert len(symbols) == 84
+    assert len(set(symbols)) == 84  # no duplicates
 
     semi_ai_configs = aggressive_btc.SEMI_AI_CONFIGS
     stock_configs = aggressive_btc.STOCK_CONFIGS
@@ -51,7 +54,7 @@ def test_aggressive_configs_has_85_distinct_stock_symbols_across_four_pools():
     assert len(semi_ai_configs) == 30
     assert len(stock_configs) == 35
     assert len(finance_configs) == 16
-    assert len(energy_configs) == 4
+    assert len(energy_configs) == 3
     assert "NVDAUSDT" in [sc.symbol for sc in semi_ai_configs]
     assert "AVGOUSDT" in [sc.symbol for sc in semi_ai_configs]  # moved from the general pool -- it's a chipmaker too
     assert "QCOMUSDT" in [sc.symbol for sc in semi_ai_configs]  # S&P500 cross-check addition

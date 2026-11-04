@@ -141,8 +141,9 @@ SYMBOL_KEYWORDS = {
     "METUSDT": ["metlife"],
     "PYPLUSDT": ["paypal"],
     "VUSDT": ["visa inc", "visa card"],
-    # Fourth pool, ENERGY_CONFIGS -- oil/gas majors.
-    "CVXUSDT": ["chevron corporation", "chevron corp"],
+    # Fourth pool, ENERGY_CONFIGS -- oil/gas majors. CVXUSDT (Chevron)
+    # deliberately excluded -- see aggressive_btc.ENERGY_SYMBOLS's comment:
+    # that symbol is actually Convex Finance's crypto token, not Chevron.
     "EQTUSDT": ["eqt corporation", "eqt corp"],
     "OXYUSDT": ["occidental petroleum"],
     "XOMUSDT": ["exxonmobil", "exxon mobil", "exxon"],
