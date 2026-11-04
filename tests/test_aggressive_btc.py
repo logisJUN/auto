@@ -1457,6 +1457,62 @@ def test_try_enter_proceeds_once_the_backoff_expires(tmp_path):
     client.open_position.assert_called_once()
 
 
+# -- _check_edgar_filings ---------------------------------------------------------
+
+def test_check_edgar_filings_notifies_and_logs_each_new_filing(tmp_path):
+    watcher = MagicMock()
+    watcher.check_for_new_filings.return_value = [
+        {"ticker": "AAPL", "title": "8-K - Apple Inc.", "link": "https://sec.gov/x"},
+    ]
+    notifier = Notifier(None, None)
+    sent = []
+    notifier.send = lambda msg: sent.append(msg)
+    log_dir = str(tmp_path / "logs")
+
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)
+
+    assert len(sent) == 1
+    assert "AAPLUSDT" in sent[0]
+    assert "8-K" in sent[0]
+    decisions = read_recent_decisions(log_dir)
+    edgar_decisions = [d for d in decisions if d.get("event") == "edgar_filing"]
+    assert len(edgar_decisions) == 1
+    assert edgar_decisions[0]["symbol"] == "AAPLUSDT"
+
+
+def test_check_edgar_filings_noop_when_nothing_new(tmp_path):
+    watcher = MagicMock()
+    watcher.check_for_new_filings.return_value = []
+    notifier = Notifier(None, None)
+    sent = []
+    notifier.send = lambda msg: sent.append(msg)
+    log_dir = str(tmp_path / "logs")
+
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)
+
+    assert sent == []
+    assert read_recent_decisions(log_dir) == []
+
+
+def test_check_edgar_filings_tolerates_the_notifier_failing(tmp_path):
+    # A notifier.send failure must not stop the decisions.jsonl record (and
+    # must not propagate -- this whole function is wrapped by main()'s own
+    # try/except too, but it shouldn't need that safety net for this).
+    watcher = MagicMock()
+    watcher.check_for_new_filings.return_value = [
+        {"ticker": "MSFT", "title": "8-K - Microsoft Corp", "link": "https://sec.gov/y"},
+    ]
+    notifier = Notifier(None, None)
+    notifier.send = MagicMock(side_effect=RuntimeError("simulated telegram failure"))
+    log_dir = str(tmp_path / "logs")
+
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)  # must not raise
+
+    decisions = read_recent_decisions(log_dir)
+    assert len(decisions) == 1
+    assert decisions[0]["symbol"] == "MSFTUSDT"
+
+
 # -- _resolve_credentials ---------------------------------------------------------
 
 _SECRETS = Secrets(bybit_api_key="live-key", bybit_api_secret="live-secret", bybit_testnet=False,

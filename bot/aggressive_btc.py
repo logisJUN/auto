@@ -185,6 +185,7 @@ from bot.logger import log_decision
 from bot.notify import Notifier
 from bot.risk.position_sizing import compute_qty_fixed_margin
 from bot.signals import technical
+from bot.signals.edgar import EdgarFilingWatcher
 from bot.signals.news import NewsSignal
 from bot.signals.polymarket import PolymarketSignal
 from bot.state import StateStore
@@ -1259,6 +1260,30 @@ def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifi
             logger.exception("aggressive_btc: failed to log position_adopted decision")
 
 
+def _check_edgar_filings(watcher: EdgarFilingWatcher, notifier: Notifier, log_dir: str):
+    """Called once per main-loop iteration (see main()) -- notifies
+    (Telegram + a decisions.jsonl "edgar_filing" row for the dashboard) the
+    instant a tracked symbol's company files an 8-K with the SEC. See
+    bot/signals/edgar.py's module docstring for why this is notification-
+    only, not blended into any symbol's trading score. Caught by the caller
+    too, but EdgarFilingWatcher.check_for_new_filings() itself already never
+    raises -- this wrapper only has notifier.send/log_decision to protect.
+    """
+    for filing in watcher.check_for_new_filings():
+        symbol = filing["ticker"] + "USDT"
+        msg = f"[EDGAR] {symbol} 8-K 공시 발견: {filing['title']}\n{filing['link']}"
+        logger.warning("aggressive_btc: %s", msg)
+        try:
+            notifier.send(msg)
+        except Exception:
+            logger.exception("aggressive_btc: failed to send edgar filing notification for %s", symbol)
+        try:
+            log_decision(log_dir, {"event": "edgar_filing", "symbol": symbol,
+                                    "title": filing["title"], "link": filing["link"]})
+        except Exception:
+            logger.exception("aggressive_btc: failed to log edgar_filing decision")
+
+
 def _resolve_credentials(secrets: Secrets) -> tuple[str, str] | None:
     """Bybit testnet and live are separate accounts with separate API keys --
     a live-account key will NOT authenticate against the testnet host. Going
@@ -1350,6 +1375,12 @@ def main():
                                                  symbol_cfg, log_dir))
     configs_by_symbol = {sc.symbol: sc for sc in valid_configs}
 
+    # Real-company tickers only -- SOXLUSDT is a tokenized ETF, not a company
+    # that itself files anything with the SEC.
+    edgar_watcher = EdgarFilingWatcher(
+        {sc.symbol.replace("USDT", "") for sc in valid_configs if sc.symbol != "SOXLUSDT"}
+    )
+
     active_symbols_desc = ", ".join(sc.symbol for sc in valid_configs)
     notifier.send(f"aggressive_btc 시작됨 - {mode} - {active_symbols_desc}")
     # Guarantees at least one row in "최근 판단 로그" the moment this process
@@ -1370,6 +1401,10 @@ def main():
                 strategy.tick()
             except Exception:
                 logger.exception("aggressive_btc: unhandled error in main loop tick for %s", strategy.symbol)
+        try:
+            _check_edgar_filings(edgar_watcher, notifier, log_dir)
+        except Exception:
+            logger.exception("aggressive_btc: unhandled error checking EDGAR filings")
         elapsed = time.time() - loop_start
         time.sleep(max(1.0, POLL_SEC - elapsed))
 

@@ -829,6 +829,13 @@ def _decision_summary(d: dict) -> str:
         # untracked.
         return (f"{d.get('symbol')} {str(d.get('side', '')).upper()} entry={d.get('entry_price')} "
                 f"SL={d.get('sl')} TP={d.get('tp')} (로컬 기록 유실 후 재등록됨)")
+    if event == "edgar_filing":
+        # Logged by aggressive_btc's EdgarFilingWatcher the moment a tracked
+        # symbol's company files an 8-K with the SEC -- notification-only
+        # (see bot/signals/edgar.py's module docstring for why this isn't
+        # blended into the trading score), so this row is purely "go look at
+        # this," not a trading decision.
+        return f"{d.get('symbol')} 8-K 공시: {d.get('title', '')}"
     return str({k: v for k, v in d.items() if k not in ("ts", "signal")})
 
 
