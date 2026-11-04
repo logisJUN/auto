@@ -53,15 +53,16 @@ actually came up; any missing one needs its ticker corrected against the
 Bybit app.
 
 Because all 85 symbols independently look for entry signals every tick, this
-module enforces a capacity cap of at most ONE LONG and ONE SHORT open at a
-time across all of them -- two concurrent positions total, never two on the
-same side (see try_enter()'s check of state.open_trade_sides()). A deliberate
-choice (over e.g. letting several symbols on the same side size down to
-minimum margin at once) so the existing 50%-of-equity-per-trade sizing never
-has to be shared or diluted across more than two concurrent positions -- in
-the worst case (a long and a short both open at once) that's up to ~100% of
-equity committed as margin, which get_available_balance_usdt()'s clamp in
-try_enter() still protects against literally overdrawing. With 85 symbols
+module no longer caps how many can be open at once (removed by explicit
+decision -- an earlier version capped it at one LONG and one SHORT total,
+with a rotation mechanism to evict the cheapest-to-exit position once both
+slots were full; see git history for that design if it's ever wanted back).
+Every symbol enters independently the moment its own signal confirms.
+margin_pct_of_equity (50%) was kept at its original value rather than
+lowered to compensate -- get_available_balance_usdt()'s clamp in try_enter()
+is what actually bounds how many concurrent positions can size up before
+running out of free margin, same safety net as before, just without the
+capacity cap organizing how it gets used. With 85 symbols
 each doing its own kline fetch every tick (POLL_SEC=30s, more than double
 the ~39 this module ran with before), one tick loop iteration now makes ~85
 sequential Bybit API calls before sleeping -- the loop degrades gracefully
@@ -95,28 +96,15 @@ Design, as specified (per symbol, via SymbolConfig):
       back gets caught as it happens rather than waiting for the next hourly
       checkpoint or a real loss. Doesn't apply to a position that's simply
       been losing the whole time (rule 5/SL already cover that).
-  5c. Capacity rotation: when both the long and short slots are already
-      taken and a DIFFERENT symbol's signal crosses ENTRY_THRESHOLD (and
-      survives the ENTRY_CONFIRMATION_TICKS confirmation in 3 above), the currently open
-      position with the highest ROI% (least loss, or most profit -- the one
-      that costs least to give up), AMONG those already open at least
-      ROTATION_MIN_HOLD_MINUTES, is closed to make room. This only
-      actually frees the slot the new signal needs if the rotated-out
-      position happened to be on that side; if the better performer is on
-      the OPPOSITE side, the new signal still can't enter that tick even
-      though the rotation happened -- an accepted trade-off of always
-      giving up the cheapest position rather than only the one that would
-      help the specific new signal. The minimum-hold exclusion exists so a
-      burst of several symbols crossing threshold around the same time
-      can't chain-evict each other within minutes of entering (observed
-      live: a ~2-minute window of this churn cost -1.17 USDT, nearly a
-      whole day's net result) -- a freshly-opened position can still exit
-      via its own SL/TP/hourly-cutoff/disaster-stop in the meantime, just
-      not get evicted for a different symbol.
-  6. 50% of equity used as margin per trade (safe here specifically because
-     of the at-most-one-long-and-one-short cap above -- it was NOT safe to
-     also give every stock symbol 50% without that cap, since several could
-     otherwise try to commit 50% each at once on the same side).
+  6. 50% of equity used as margin per trade. This was originally justified
+     by an at-most-one-long-and-one-short capacity cap (removed by explicit
+     decision -- see the module docstring's opening section); kept at 50%
+     anyway rather than lowered to compensate, so get_available_balance_usdt()'s
+     clamp in try_enter() is now the main thing standing between several
+     symbols confirming at once and actually overcommitting margin -- it
+     still prevents literal overdraw, but doesn't prevent many correlated
+     symbols (e.g. the whole semiconductor pool moving together) from all
+     trying to enter around the same time.
   7. Leverage auto-sized so the 12% target is roughly reachable within an
      hour given the symbol's recent realized volatility -- clipped to
      [min_leverage, max_leverage], hard-capped at leverage_hard_cap no
@@ -155,9 +143,8 @@ Design, as specified (per symbol, via SymbolConfig):
       CHASE_LOOKBACK_CANDLES candles) in the SAME direction -- every
       technical sub-score plus volume_score reads a big, fast recent move as
       strong confirmation, with no way to tell a fresh breakout apart from
-      an already-exhausted spike about to pull back. Checked after entry
-      confirmation (3 above) but before capacity rotation, so a chasing
-      signal can't even bump out a real position to take its place.
+      an already-exhausted spike about to pull back. Checked right after
+      entry confirmation (3 above).
   11. Minimum volatility floor: entries are skipped entirely when the 1h ATR
       is below MIN_VOLATILITY_ATR_PCT of price -- a dead/chopping market
       where the likely move is mostly noise. Particularly important given
@@ -240,22 +227,6 @@ DISASTER_STOP_MULTIPLIER = 2.0
 ENTRY_CONFIRMATION_TICKS = 3
 SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES = 2
 SYMBOL_PAUSE_DURATION_MIN = 360  # 6 hours
-# Capacity rotation (see try_enter()) only considers a currently open
-# position a rotation candidate once it's been open at least this long.
-# Without this, a burst of several symbols crossing ENTRY_THRESHOLD around
-# the same time (e.g. a broad market move) can cause a position to be
-# opened and then immediately rotated back out by the next symbol's signal,
-# which itself gets rotated out by the one after that -- a rapid merry-go-
-# round of tiny, barely-established positions each taking a small loss.
-# Observed live: a ~2-minute window produced 10 closes (8 of them
-# rotated_out) for a combined -1.17 USDT, nearly the day's entire net
-# result. A freshly-opened position is excluded from being the "best
-# performer" to rotate out (even if it currently reads as the best ROI%)
-# until it clears this age -- it can still be closed by its OWN management
-# rules (SL/TP/hourly cutoff/disaster stop) in the meantime, just not
-# evicted to make room for a different symbol.
-ROTATION_MIN_HOLD_MINUTES = 10
-ROTATION_MIN_HOLD_SEC = ROTATION_MIN_HOLD_MINUTES * 60
 # Skip a confirmed entry if price has already moved this many ATR multiples
 # (over CHASE_LOOKBACK_CANDLES candles) in the SAME direction as the
 # candidate -- every technical sub-score (trend/momentum/MACD/Bollinger)
@@ -814,10 +785,6 @@ class AggressiveBTCStrategy:
             self.state.set_skip_reason(self.symbol, f"연속손실 백오프 중 ({backoff.get('reason', '')})")
             return
 
-        # No early "capacity full, skip the kline fetch" shortcut anymore --
-        # a confirmed signal here may trigger rotation (see below) even when
-        # both sides are already taken, so the signal has to be computed
-        # regardless of current capacity.
         signal = self.get_signal()
         # Unthrottled, unlike _log_signal_check's decisions.jsonl record below --
         # this is the only proof-of-life trace for a "still neutral" tick
@@ -854,10 +821,8 @@ class AggressiveBTCStrategy:
         # on the next check) more likely to trigger an entry that immediately
         # loses. Requiring the SAME direction on ENTRY_CONFIRMATION_TICKS
         # consecutive checks filters that out, at the cost of entering that
-        # many checks later than the threshold itself was crossed. Applies
-        # equally to a signal that will go on to trigger rotation below --
-        # a flickering signal shouldn't be able to bump a real position out
-        # either. A pending dict with no "count" (e.g. set directly in a
+        # many checks later than the threshold itself was crossed. A
+        # pending dict with no "count" (e.g. set directly in a
         # test to fast-forward past confirmation) is treated as already one
         # tick short of confirmed, matching the pre-counter behavior.
         if self._pending_entry is None or self._pending_entry.get("direction") != direction:
@@ -879,10 +844,7 @@ class AggressiveBTCStrategy:
         # Chase-entry filter: skip regardless of score if price has already
         # moved MAX_ENTRY_CHASE_ATR_MULT+ ATR multiples in this SAME
         # direction over the last CHASE_LOOKBACK_CANDLES -- see
-        # MAX_ENTRY_CHASE_ATR_MULT's module-level comment. Checked after
-        # confirmation (not before) so a chasing signal doesn't even get to
-        # trigger rotation below -- bumping out a real position to chase an
-        # already-exhausted move would be worse than just skipping.
+        # MAX_ENTRY_CHASE_ATR_MULT's module-level comment.
         extension = signal.get("recent_extension_atr_mult", 0.0)
         chasing = (direction == "long" and extension > MAX_ENTRY_CHASE_ATR_MULT) or \
                   (direction == "short" and extension < -MAX_ENTRY_CHASE_ATR_MULT)
@@ -891,44 +853,15 @@ class AggressiveBTCStrategy:
                 self.symbol, f"최근 급등/급락 추격 방지 (최근 변동 {extension:+.1f}×ATR)")
             return
 
-        # Capacity cap: at most one LONG and one SHORT open at a time across
-        # all configured symbols (see module docstring).
-        existing_sides = self.state.open_trade_sides()
-        if len(existing_sides) >= 2:
-            # Both sides already taken -- rather than just skip this
-            # confirmed signal, give up whichever of the 2 open positions
-            # currently costs least to let go (highest ROI%, i.e. least
-            # loss or most profit) and try to take its place. Only actually
-            # frees up THIS signal's side if the position closed happened to
-            # be on it -- if the worse-but-matching-side position gets
-            # outranked by a better-but-wrong-side one, this symbol still
-            # can't enter this tick (the needed side is still occupied), but
-            # the rotation still happened (that's the explicit trade-off
-            # accepted for this rule: always let go of the cheapest-to-exit
-            # position when capacity is full, not just the one that would
-            # help this particular signal).
-            best = self._best_performer_among_open_positions()
-            if best is None:
-                self.state.set_skip_reason(
-                    self.symbol, "롱/숏 포지션 모두 이미 보유 중 (교체 대상 없음 - 최소 보유시간 미충족 또는 조회 실패)")
-                return
-            best_symbol, best_trade = best
-            logger.info("aggressive_btc: capacity full -- rotating out %s (best performer among open "
-                        "positions) to try to free room for %s %s", best_symbol, self.symbol, direction)
-            self._close_and_settle(best_symbol, best_trade, "rotated_out")
-            existing_sides = self.state.open_trade_sides()
-            if direction in existing_sides:
-                self.state.set_skip_reason(
-                    self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 "
-                                 f"(포지션 회전은 발생했으나 방향이 맞지 않음)")
-                return
-        elif direction in existing_sides:
-            # Only one side is occupied, and it happens to be this signal's
-            # side -- the rotation rule above is specifically for when BOTH
-            # sides are already taken, not this case, so just wait.
-            self.state.set_skip_reason(
-                self.symbol, f"{direction} 방향 포지션이 이미 다른 종목에 있음 (방향당 1개 제한)")
-            return
+        # No capacity cap anymore (removed by explicit decision -- this
+        # module used to allow at most one LONG and one SHORT open at a time
+        # across all configured symbols, with a rotation mechanism to evict
+        # the cheapest-to-exit position when both slots were full). Every
+        # symbol now enters independently the moment its own signal
+        # confirms; margin_pct_of_equity (50%) was kept at its original
+        # value, not lowered to compensate -- see get_available_balance_usdt()'s
+        # clamp just below, which is what now actually bounds how many
+        # concurrent positions can size up before running out of free margin.
 
         equity = self.client.get_equity_usdt()
         margin = equity * (self.cfg.margin_pct_of_equity / 100.0)
@@ -1069,7 +1002,7 @@ class AggressiveBTCStrategy:
         if exchange_position is None:
             # SL or TP already fired on the exchange side -- nothing left to
             # close, just settle locally.
-            self._close_and_settle(self.symbol, trade, "sl_tp_hit", already_closed=True)
+            self._close_and_settle(trade, "sl_tp_hit", already_closed=True)
             return
 
         hours_open = (time.time() - trade["opened_at"]) / 3600.0
@@ -1086,7 +1019,7 @@ class AggressiveBTCStrategy:
             logger.critical("aggressive_btc: %s disaster stop -- ROI=%.2f%% past %.1fx the configured "
                              "-%.1f%% SL, force-closing", self.symbol, current_roi,
                              DISASTER_STOP_MULTIPLIER, self.cfg.stop_loss_pct)
-            self._close_and_settle(self.symbol, trade, "disaster_stop")
+            self._close_and_settle(trade, "disaster_stop")
             return
 
         if current_roi > 0:
@@ -1098,7 +1031,7 @@ class AggressiveBTCStrategy:
         if (hours_open >= BREAKEVEN_STOP_AFTER_HOURS and trade.get("was_profitable") and current_roi <= 0):
             logger.info("aggressive_btc: %s breakeven stop at hour %.1f -- was profitable, now ROI=%.2f%%",
                         self.symbol, hours_open, current_roi)
-            self._close_and_settle(self.symbol, trade, "breakeven_stop")
+            self._close_and_settle(trade, "breakeven_stop")
             return
 
         should_close, new_mark = should_hourly_cutoff(hours_open, current_roi, trade["last_hour_checked"])
@@ -1106,39 +1039,13 @@ class AggressiveBTCStrategy:
         if should_close:
             logger.info("aggressive_btc: %s hourly cutoff at hour %d, ROI=%.2f%% still negative -- closing",
                         self.symbol, new_mark, current_roi)
-            self._close_and_settle(self.symbol, trade, "hourly_cutoff")
+            self._close_and_settle(trade, "hourly_cutoff")
             return
 
         self.state.set_trade(self.symbol, trade)
 
-    def _best_performer_among_open_positions(self) -> tuple[str, dict] | None:
-        """For the capacity-rotation logic in try_enter(): among the (at
-        most 2) currently open aggressive_btc positions that have been open
-        at least ROTATION_MIN_HOLD_SEC, finds the one with the HIGHEST
-        current ROI% (least loss, or most profit) -- the one that costs
-        least to give up. Returns (symbol, trade) or None if no eligible
-        position's exchange data could be read (including the case where
-        every open position is still too freshly opened to be rotated --
-        see ROTATION_MIN_HOLD_MINUTES).
-        """
-        trades = self.state.snapshot().get("trades", {})
-        now = time.time()
-        best: tuple[str, dict, float] | None = None
-        for sym, trade in trades.items():
-            if now - trade.get("opened_at", 0) < ROTATION_MIN_HOLD_SEC:
-                continue
-            try:
-                pos = self.client.get_position(sym)
-            except BybitAPIError:
-                continue
-            if pos is None:
-                continue
-            roi = roi_pct(pos["unrealized_pnl"], trade["margin"])
-            if best is None or roi > best[2]:
-                best = (sym, trade, roi)
-        return (best[0], best[1]) if best else None
-
-    def _close_and_settle(self, symbol: str, trade: dict, reason: str, already_closed: bool = False):
+    def _close_and_settle(self, trade: dict, reason: str, already_closed: bool = False):
+        symbol = self.symbol
         if not already_closed:
             try:
                 close_qty = self.client.round_qty(symbol, trade["qty"])
@@ -1167,8 +1074,8 @@ class AggressiveBTCStrategy:
         # Per-symbol consecutive-loss cooldown -- see SYMBOL_PAUSE_AFTER_
         # CONSECUTIVE_LOSSES. Scored by realized pnl regardless of close
         # reason (same as the main bot's equivalent), so a string of
-        # rotated_out/hourly_cutoff/breakeven_stop losses on one symbol
-        # triggers this exactly like a string of sl_tp_hit losses would.
+        # hourly_cutoff/breakeven_stop losses on one symbol triggers this
+        # exactly like a string of sl_tp_hit losses would.
         streak = self.state.record_symbol_result(symbol, won=pnl >= 0)
         if SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES > 0 and streak >= SYMBOL_PAUSE_AFTER_CONSECUTIVE_LOSSES:
             self.state.set_entry_backoff(symbol, time.time() + SYMBOL_PAUSE_DURATION_MIN * 60,

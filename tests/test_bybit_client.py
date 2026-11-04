@@ -62,12 +62,15 @@ def test_get_closed_pnl_since_returns_partial_results_on_error():
     assert records == [{"symbol": "AUSDT", "closedPnl": "1.0"}]
 
 
-def test_get_closed_pnl_since_walks_backward_across_multiple_windows():
+def test_get_closed_pnl_since_walks_backward_across_multiple_windows(monkeypatch):
     # Bybit enforces startTime/endTime no more than one window apart per
     # call -- a range spanning 3 windows must become 3 separate calls,
-    # walking backward from now.
+    # walking backward from now. time.time() is pinned so the implementation's
+    # own internal `now` (computed a moment after this test's) can't
+    # occasionally land a millisecond later and flake this assertion.
     client = _make_client()
     now_ms = int(time.time() * 1000)
+    monkeypatch.setattr(time, "time", lambda: now_ms / 1000.0)
     window_ms = 7 * 24 * 3600 * 1000
     start_ms = now_ms - int(2.5 * window_ms)  # needs 3 windows to fully cover
     client.session.get_closed_pnl.side_effect = [

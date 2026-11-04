@@ -689,7 +689,7 @@ TEMPLATE = """
 
   {% if aggressive_list %}
   <div class="card">
-    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, {{ agg_symbol_count }}개 심볼 동시 감시 / 롱1+숏1, 최대 동시 2포지션)</h2>
+    <h2 style="font-size:1rem;">⚡ Aggressive 전략 (별도, {{ agg_symbol_count }}개 심볼 동시 감시, 포지션 수 제한 없음)</h2>
     <div class="grid" style="margin-bottom:10px;">
       <div><div class="stat-label">누적손익(10/01~) 합계</div><div class="stat-value {{ 'pnl-pos' if aggressive_totals.cumulative_pnl >= 0 else 'pnl-neg' }}">{{ '%.4f'|format(aggressive_totals.cumulative_pnl) }}</div></div>
       <div><div class="stat-label">자동 진입</div><div class="stat-value">
