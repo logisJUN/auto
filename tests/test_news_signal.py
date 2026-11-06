@@ -95,3 +95,53 @@ def test_fetch_rss_uses_a_bounded_timeout_and_skips_a_failing_feed(monkeypatch):
     assert calls == [("https://bad.example/rss", 10), ("https://good.example/rss", 10)]
     assert len(articles) == 1
     assert articles[0]["title"] == "Good feed article"
+
+
+def _rss_response(item_xml: str):
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.content = f"<rss><channel>{item_xml}</channel></rss>".encode()
+    return resp
+
+
+# -- summary cleanup (dashboard detail-page display, see bot/newsfeed.py) --
+
+def test_fetch_rss_strips_html_tags_from_the_description(monkeypatch):
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>Headline</title><description>"
+        "&lt;p&gt;Plain &lt;b&gt;text&lt;/b&gt; here.&lt;/p&gt;</description></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert articles[0]["summary"] == "Plain text here."
+
+
+def test_fetch_rss_falls_back_to_content_encoded_when_description_is_empty(monkeypatch):
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>Headline</title>"
+        "<content:encoded xmlns:content=\"http://purl.org/rss/1.0/modules/content/\">"
+        "&lt;p&gt;Full body text.&lt;/p&gt;</content:encoded></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert articles[0]["summary"] == "Full body text."
+
+
+def test_fetch_rss_drops_a_summary_that_just_repeats_the_title(monkeypatch):
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>Same Text</title><description>Same Text</description></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert articles[0]["summary"] == ""
+
+
+def test_fetch_rss_summary_is_empty_when_feed_provides_none(monkeypatch):
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>No description here</title></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert articles[0]["summary"] == ""
+    # scoring text still includes the title even with no summary to append
+    assert "No description here" in articles[0]["text"]

@@ -1302,17 +1302,21 @@ _NEWSFEED_DETAIL_TEMPLATE = """
     {% if a.link %}<div class="small"><a href="{{ a.link }}" target="_blank">원문 보기 →</a></div>{% endif %}
   </div>
 
-  {% if a.summary %}
   <div class="card">
     <h2 style="font-size:0.9rem;">요약</h2>
+    {% if a.summary %}
     <div>{{ a.summary }}</div>
+    {% else %}
+    <div class="small">이 기사는 원문 피드에 요약이 없어요. 위 "원문 보기"에서 직접 확인하세요.</div>
+    {% endif %}
   </div>
-  {% endif %}
 
   <div class="card">
     <h2 style="font-size:0.9rem;">AI 분석 (무료 키워드 기반, 참고용)</h2>
-    {% if a.ai_direction == "neutral" %}
+    {% if a.ai_direction == "neutral" and a.category == "filing" %}
       <div>➖ 공시 제목만으로는 방향성을 판단할 수 없어요.</div>
+    {% elif a.ai_direction == "neutral" %}
+      <div>➖ 제목/요약에 뚜렷한 상승·하락 키워드가 없어서 중립으로 판단됐어요.</div>
     {% else %}
       <div>{{ "📈 상승 쪽 신호" if a.ai_direction == "up" else "📉 하락 쪽 신호" }} (신뢰도 {{ (a.ai_confidence * 100)|round(0)|int }}%)</div>
     {% endif %}

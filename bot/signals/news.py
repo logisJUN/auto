@@ -11,7 +11,9 @@ aggregator.py -- it is not meant to be predictive on its own.
 """
 from __future__ import annotations
 
+import html
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -182,6 +184,33 @@ def _score_text(text: str) -> int:
     return score
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_summary(entry, title: str) -> str:
+    """Some feeds (observed live: a "Stock Market News"-sourced article with
+    no visible summary on the dashboard) put nothing in <description> at
+    all, or put it under <content:encoded> instead -- feedparser exposes
+    that as entry.content[0].value, which <description>-only code never
+    checked. Falls back to that, strips any HTML markup either field may
+    contain (so the dashboard shows readable text, not raw tags), and drops
+    a result that's just the title repeated back (common for feeds whose
+    <description> is title-only) -- all of those end up "" here, which the
+    dashboard already renders as "no summary available" rather than hiding
+    the section with no explanation.
+    """
+    raw = entry.get("summary", "") or ""
+    if not raw.strip():
+        content = entry.get("content") or []
+        if content:
+            raw = content[0].get("value", "") or ""
+    text = html.unescape(_HTML_TAG_RE.sub(" ", raw))
+    text = " ".join(text.split())
+    if not text or text.strip().lower() == title.strip().lower():
+        return ""
+    return text
+
+
 def _entry_time(entry) -> datetime | None:
     for key in ("published_parsed", "updated_parsed"):
         val = entry.get(key)
@@ -216,14 +245,14 @@ def _fetch_rss(feeds: list[str], lookback: timedelta) -> list[dict]:
             if ts and ts < cutoff:
                 continue
             title = entry.get("title", "")
-            summary = entry.get("summary", "")
-            # link/summary/source kept as their own fields (not just folded
-            # into "text") so bot/newsfeed.py can show a real article detail
-            # page -- "text" (title+summary concatenated) stays as-is since
-            # score_for_symbol's keyword matching already depends on it.
+            # Raw (un-cleaned) summary for scoring/keyword-matching text --
+            # score_for_symbol's keyword matching doesn't care about stray
+            # HTML tags, so this stays exactly as before. _clean_summary's
+            # output (see its own docstring) is only for display.
+            raw_summary = entry.get("summary", "")
             articles.append({
-                "title": title, "text": f"{title} {summary}", "ts": ts,
-                "link": entry.get("link", ""), "summary": summary, "source": feed_title,
+                "title": title, "text": f"{title} {raw_summary}", "ts": ts,
+                "link": entry.get("link", ""), "summary": _clean_summary(entry, title), "source": feed_title,
             })
     return articles
 
@@ -256,8 +285,11 @@ def _fetch_newsapi(api_key: str, query: str, lookback: timedelta, page_size: int
             except ValueError:
                 ts = None
         source = (a.get("source") or {}).get("name", "")
+        clean_desc = html.unescape(_HTML_TAG_RE.sub(" ", desc)).strip()
+        if clean_desc.lower() == title.strip().lower():
+            clean_desc = ""
         out.append({"title": title, "text": f"{title} {desc}", "ts": ts,
-                    "link": a.get("url", ""), "summary": desc, "source": source})
+                    "link": a.get("url", ""), "summary": clean_desc, "source": source})
     return out
 
 
