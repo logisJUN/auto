@@ -1261,7 +1261,7 @@ def test_check_edgar_filings_notifies_and_logs_each_new_filing(tmp_path):
     notifier.send = lambda msg: sent.append(msg)
     log_dir = str(tmp_path / "logs")
 
-    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir, MagicMock())
 
     assert len(sent) == 1
     assert "AAPLUSDT" in sent[0]
@@ -1280,7 +1280,7 @@ def test_check_edgar_filings_noop_when_nothing_new(tmp_path):
     notifier.send = lambda msg: sent.append(msg)
     log_dir = str(tmp_path / "logs")
 
-    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir, MagicMock())
 
     assert sent == []
     assert read_recent_decisions(log_dir) == []
@@ -1298,7 +1298,7 @@ def test_check_edgar_filings_tolerates_the_notifier_failing(tmp_path):
     notifier.send = MagicMock(side_effect=RuntimeError("simulated telegram failure"))
     log_dir = str(tmp_path / "logs")
 
-    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir)  # must not raise
+    aggressive_btc._check_edgar_filings(watcher, notifier, log_dir, MagicMock())  # must not raise
 
     decisions = read_recent_decisions(log_dir)
     assert len(decisions) == 1

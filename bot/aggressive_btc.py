@@ -178,6 +178,7 @@ from aggressive_btc_settings import ENTRY_THRESHOLD
 from bot.config import Secrets, load_config
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.logger import log_decision
+from bot import newsfeed
 from bot.notify import Notifier
 from bot.risk.position_sizing import compute_qty_fixed_margin
 from bot.signals import technical
@@ -1266,14 +1267,15 @@ def _reconcile_orphaned_positions(client: BybitClient, state: StateStore, notifi
             logger.exception("aggressive_btc: failed to log position_adopted decision")
 
 
-def _check_edgar_filings(watcher: EdgarFilingWatcher, notifier: Notifier, log_dir: str):
+def _check_edgar_filings(watcher: EdgarFilingWatcher, notifier: Notifier, log_dir: str, client: BybitClient):
     """Called once per main-loop iteration (see main()) -- notifies
     (Telegram + a decisions.jsonl "edgar_filing" row for the dashboard) the
     instant a tracked symbol's company files an 8-K with the SEC. See
     bot/signals/edgar.py's module docstring for why this is notification-
     only, not blended into any symbol's trading score. Caught by the caller
     too, but EdgarFilingWatcher.check_for_new_filings() itself already never
-    raises -- this wrapper only has notifier.send/log_decision to protect.
+    raises -- this wrapper only has notifier.send/log_decision/newsfeed to
+    protect.
     """
     for filing in watcher.check_for_new_filings():
         symbol = filing["ticker"] + "USDT"
@@ -1288,6 +1290,10 @@ def _check_edgar_filings(watcher: EdgarFilingWatcher, notifier: Notifier, log_di
                                     "title": filing["title"], "link": filing["link"]})
         except Exception:
             logger.exception("aggressive_btc: failed to log edgar_filing decision")
+        try:
+            newsfeed.save_filing_article(symbol, filing, client)
+        except Exception:
+            logger.exception("aggressive_btc: failed to save edgar filing %s to newsfeed", symbol)
 
 
 def _resolve_credentials(secrets: Secrets) -> tuple[str, str] | None:
@@ -1369,6 +1375,10 @@ def main():
     # refresh interval, not once each.
     poly_cache: dict[int, PolymarketSignal] = {}
     news_cache: dict[int, NewsSignal] = {}
+    # Inverse of news_cache -- which symbols share a given pool's NewsSignal
+    # instance, keyed the same way (id(news_cfg)) -- see
+    # newsfeed.collect_from_news_cache's use of this below.
+    symbols_by_news_key: dict[int, list[str]] = {}
     strategies = []
     for symbol_cfg in valid_configs:
         poly_key = id(symbol_cfg.polymarket_cfg)
@@ -1377,6 +1387,7 @@ def main():
         news_key = id(symbol_cfg.news_cfg)
         if news_key not in news_cache:
             news_cache[news_key] = NewsSignal(symbol_cfg.news_cfg, secrets.newsapi_key)
+        symbols_by_news_key.setdefault(news_key, []).append(symbol_cfg.symbol)
         strategies.append(AggressiveBTCStrategy(client, state, notifier, poly_cache[poly_key], news_cache[news_key],
                                                  symbol_cfg, log_dir))
     configs_by_symbol = {sc.symbol: sc for sc in valid_configs}
@@ -1408,9 +1419,17 @@ def main():
             except Exception:
                 logger.exception("aggressive_btc: unhandled error in main loop tick for %s", strategy.symbol)
         try:
-            _check_edgar_filings(edgar_watcher, notifier, log_dir)
+            _check_edgar_filings(edgar_watcher, notifier, log_dir, client)
         except Exception:
             logger.exception("aggressive_btc: unhandled error checking EDGAR filings")
+        try:
+            newsfeed.collect_from_news_cache(news_cache, symbols_by_news_key, client)
+        except Exception:
+            logger.exception("aggressive_btc: unhandled error collecting newsfeed articles")
+        try:
+            newsfeed.resolve_due_articles(client)
+        except Exception:
+            logger.exception("aggressive_btc: unhandled error resolving newsfeed articles")
         elapsed = time.time() - loop_start
         time.sleep(max(1.0, POLL_SEC - elapsed))
 

@@ -30,7 +30,7 @@ from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import compute_performance_summary, read_recent_decisions
 from bot.risk import stress_test
 from bot.state import StateStore
-from bot import aggressive_btc
+from bot import aggressive_btc, newsfeed
 from sp500_tickers import SP500_TICKERS
 
 # Render's containers run in UTC -- time.localtime() would show every
@@ -496,6 +496,7 @@ TEMPLATE = """
   <button id="copy-btn" class="copy-btn" onclick="copyReview()">📋 리뷰 복사</button>
   <a href="/history?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">📄 청산 이력 리포트</a>
   <a href="/check-sp500-symbols?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">🔎 S&P500 심볼 확인</a>
+  <a href="/newsfeed?token={{ token }}" style="float:right; margin-right:8px; line-height:2.2;">📰 뉴스 피드</a>
   <div id="report">
   <h1>Bybit Futures Bot</h1>
   <span class="mode {{ 'testnet' if testnet else 'live' }}">{{ 'TESTNET (모의투자)' if testnet else 'LIVE (실거래)' }}</span>
@@ -1317,6 +1318,255 @@ def check_sp500_symbols_route():
         _SP500_CHECK_TEMPLATE, report=report, checked_at_str=checked_at_str,
         token=request.args.get("token", ""),
     )
+
+
+_NEWSFEED_DISABLED_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>뉴스 피드</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  a { color:#7ee787; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1 style="font-size:1.1rem;">뉴스 피드 기능이 아직 설정되지 않았어요</h1>
+    <p>이 기능은 영속 데이터베이스(DATABASE_URL)가 있어야 작동해요. Render 재배포 때마다 로컬 파일이 초기화되기 때문에,
+    예측 적중률 기록을 계속 쌓으려면 별도의 무료 Postgres(예: neon.tech, supabase.com)를 연결해야 해요.
+    자세한 설명은 .env.example의 DATABASE_URL 항목을 참고하세요.</p>
+  </div>
+  <a href="/?token={{ token }}">← 대시보드로 돌아가기</a>
+</body>
+</html>
+"""
+
+_NEWSFEED_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>뉴스 피드</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  h1 { font-size:1.2rem; margin-bottom:4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap:8px; }
+  .stat-label { font-size:0.75rem; color:#8b949e; }
+  .stat-value { font-size:1.1rem; font-weight:600; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
+  .chip { display:inline-block; padding:1px 6px; border-radius:6px; font-size:0.75rem; }
+  .chip.up { background:#1a4d2e; color:#7ee787; }
+  .chip.down { background:#4d1a1a; color:#ff7b72; }
+  .chip.neutral { background:#30363d; color:#8b949e; }
+  a { color:#7ee787; }
+  a.title-link { color:#e6edf3; text-decoration:none; }
+  a.title-link:active { color:#7ee787; }
+</style>
+</head>
+<body>
+  <a href="/?token={{ token }}" style="float:right;">← 대시보드로</a>
+  <h1>📰 뉴스/실적/공시 피드</h1>
+  <div class="small" style="margin-bottom:10px;">aggressive_btc가 감시하는 종목들의 뉴스·실적·SEC 공시를 모아서, 무료 키워드 분석으로 상승/하락 쪽을 가늠해보고, {{ "4" }}시간 뒤 실제 가격과 맞았는지 쌓아갑니다. 거래에는 영향을 주지 않아요.</div>
+
+  <div class="card">
+    <div class="grid">
+      <div><div class="stat-label">AI 적중률</div><div class="stat-value">{{ "%.1f"|format(stats.ai_accuracy_pct) + "%" if stats.ai_accuracy_pct is not none else "-" }}</div><div class="small">{{ stats.ai_correct }}/{{ stats.ai_judged }}건</div></div>
+      <div><div class="stat-label">내 적중률</div><div class="stat-value">{{ "%.1f"|format(stats.user_accuracy_pct) + "%" if stats.user_accuracy_pct is not none else "-" }}</div><div class="small">{{ stats.user_correct }}/{{ stats.user_judged }}건</div></div>
+    </div>
+  </div>
+
+  {% if stats.breakdown %}
+  <div class="card">
+    <h2 style="font-size:0.95rem;">카테고리별 신호-결과 누적 (예: 실적 호재 신호였는데 실제론 하락)</h2>
+    <table>
+      <tr><th>카테고리</th><th>AI 신호</th><th>실제 결과</th><th>건수</th></tr>
+      {% for b in stats.breakdown %}
+      <tr>
+        <td>{{ {"earnings":"실적", "filing":"공시", "news":"뉴스"}.get(b.category, b.category) }}</td>
+        <td>{{ "상승" if b.ai_direction == "up" else "하락" }}</td>
+        <td class="{{ 'pnl-pos' if b.actual_direction == 'up' else ('pnl-neg' if b.actual_direction == 'down' else '') }}">{{ "상승" if b.actual_direction == "up" else ("하락" if b.actual_direction == "down" else "변동없음") }}</td>
+        <td>{{ b.count }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  <form method="GET" action="/newsfeed" style="margin-bottom:10px;">
+    <input type="hidden" name="token" value="{{ token }}">
+    <input type="text" name="symbol" placeholder="종목 필터 (예: AAPLUSDT)" value="{{ symbol_filter }}"
+           style="background:#161b22; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:6px 10px;">
+    <button type="submit" style="background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:6px 12px;">필터</button>
+  </form>
+
+  <div class="card">
+    <table>
+      <tr><th>시각</th><th>종목</th><th>구분</th><th>제목</th><th>AI 신호</th><th>결과</th></tr>
+      {% for a in articles %}
+      <tr>
+        <td class="small">{{ a.published_str }}</td>
+        <td>{{ a.symbol }}</td>
+        <td class="small">{{ {"earnings":"실적", "filing":"공시", "news":"뉴스"}.get(a.category, a.category) }}</td>
+        <td><a class="title-link" href="/newsfeed/{{ a.id }}?token={{ token }}">{{ a.title }}</a></td>
+        <td><span class="chip {{ a.ai_direction }}">{{ "상승" if a.ai_direction == "up" else ("하락" if a.ai_direction == "down" else "중립") }} {{ (a.ai_confidence * 100)|round(0)|int }}%</span></td>
+        <td class="small">
+          {% if a.resolved %}
+            {% if a.actual_direction %}
+              실제: {{ "상승" if a.actual_direction == "up" else ("하락" if a.actual_direction == "down" else "변동없음") }}
+              {% if a.ai_correct is not none %}/ AI {{ "✅" if a.ai_correct else "❌" }}{% endif %}
+              {% if a.user_correct is not none %}/ 나 {{ "✅" if a.user_correct else "❌" }}{% endif %}
+            {% else %}데이터 부족{% endif %}
+          {% elif a.user_direction %}
+            내 예측: {{ "상승" if a.user_direction == "up" else "하락" }} (대기중)
+          {% else %}
+            대기중
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not articles %}
+      <tr><td colspan="6" class="small">아직 수집된 자료가 없어요. aggressive_btc가 돌면서 조금씩 쌓여요.</td></tr>
+      {% endif %}
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+_NEWSFEED_DETAIL_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ a.title }}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:16px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; margin-bottom:14px; }
+  .small { color:#8b949e; font-size:0.75rem; }
+  .pnl-pos { color:#7ee787; } .pnl-neg { color:#ff7b72; }
+  a { color:#7ee787; }
+  .predict-btn { border-radius:6px; padding:10px 16px; font-size:0.9rem; font-weight:600; margin-right:8px; }
+  .up-btn { background:#1a4d2e; color:#7ee787; border:1px solid #236e3f; }
+  .down-btn { background:#4d1a1a; color:#ff7b72; border:1px solid #6e2323; }
+</style>
+</head>
+<body>
+  <a href="/newsfeed?token={{ token }}">← 피드로 돌아가기</a>
+  <div class="card">
+    <h1 style="font-size:1.05rem;">{{ a.title }}</h1>
+    <div class="small">{{ a.symbol }} · {{ {"earnings":"실적", "filing":"공시", "news":"뉴스"}.get(a.category, a.category) }} · {{ a.source }} · {{ published_str }}</div>
+    {% if a.link %}<div class="small"><a href="{{ a.link }}" target="_blank">원문 보기 →</a></div>{% endif %}
+  </div>
+
+  {% if a.summary %}
+  <div class="card">
+    <h2 style="font-size:0.9rem;">요약</h2>
+    <div>{{ a.summary }}</div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2 style="font-size:0.9rem;">AI 분석 (무료 키워드 기반, 참고용)</h2>
+    {% if a.ai_direction == "neutral" %}
+      <div>➖ 공시 제목만으로는 방향성을 판단할 수 없어요.</div>
+    {% else %}
+      <div>{{ "📈 상승 쪽 신호" if a.ai_direction == "up" else "📉 하락 쪽 신호" }} (신뢰도 {{ (a.ai_confidence * 100)|round(0)|int }}%)</div>
+    {% endif %}
+    <div class="small" style="margin-top:6px;">
+      발표 시점 가격: {{ "%.4f"|format(a.price_at_publish) if a.price_at_publish is not none else "조회 실패" }}
+      {% if current_price is not none %} / 현재가: {{ "%.4f"|format(current_price) }}{% endif %}
+      {% if a.resolved and a.price_at_resolve is not none %} / 판정 시점({{ resolve_str }}) 가격: {{ "%.4f"|format(a.price_at_resolve) }}{% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:0.9rem;">내 예측</h2>
+    {% if can_predict %}
+      <form method="POST" action="/newsfeed/{{ a.id }}/predict?token={{ token }}">
+        <button type="submit" name="direction" value="up" class="predict-btn up-btn">📈 상승할 것 같다</button>
+        <button type="submit" name="direction" value="down" class="predict-btn down-btn">📉 하락할 것 같다</button>
+      </form>
+    {% elif a.user_direction %}
+      <div>내 예측: {{ "상승" if a.user_direction == "up" else "하락" }}
+        {% if a.resolved %}
+          · 실제: {{ "상승" if a.actual_direction == "up" else ("하락" if a.actual_direction == "down" else "데이터 부족") }}
+          {% if a.user_correct is not none %} · {{ "✅ 적중" if a.user_correct else "❌ 틀림" }}{% endif %}
+        {% else %}
+          · {{ resolve_str }}에 결과가 나와요
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="small">이미 판정이 끝나서 예측할 수 없어요.</div>
+    {% endif %}
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/newsfeed")
+def newsfeed_route():
+    """News/earnings/SEC-filing feed for every aggressive_btc symbol -- see
+    bot/newsfeed.py's module docstring for what this needs (DATABASE_URL)
+    and why. Purely observational: predicting (the only user action here,
+    via newsfeed_predict_route) never touches trading state.
+    """
+    _check_token()
+    token = request.args.get("token", "")
+    if not newsfeed.ENABLED:
+        return render_template_string(_NEWSFEED_DISABLED_TEMPLATE, token=token)
+    symbol_filter = request.args.get("symbol", "").strip().upper() or None
+    articles = newsfeed.list_recent_articles(limit=100, symbol=symbol_filter)
+    for a in articles:
+        a["published_str"] = _kst_str(a["published_at"])
+    stats = newsfeed.get_accuracy_stats()
+    return render_template_string(
+        _NEWSFEED_TEMPLATE, articles=articles, stats=stats,
+        symbol_filter=symbol_filter or "", token=token,
+    )
+
+
+@app.route("/newsfeed/<article_id>")
+def newsfeed_detail_route(article_id):
+    _check_token()
+    token = request.args.get("token", "")
+    if not newsfeed.ENABLED:
+        return render_template_string(_NEWSFEED_DISABLED_TEMPLATE, token=token)
+    article = newsfeed.get_article(article_id)
+    if article is None:
+        abort(404)
+    current_price = None
+    if not article["resolved"]:
+        try:
+            current_price = client.get_last_price(article["symbol"])
+        except BybitAPIError:
+            current_price = None
+    return render_template_string(
+        _NEWSFEED_DETAIL_TEMPLATE, a=article, current_price=current_price,
+        published_str=_kst_str(article["published_at"]), resolve_str=_kst_str(article["resolve_at"]),
+        can_predict=(not article["resolved"]) and not article["user_direction"],
+        token=token,
+    )
+
+
+@app.route("/newsfeed/<article_id>/predict", methods=["POST"])
+def newsfeed_predict_route(article_id):
+    _check_token()
+    token = request.args.get("token", "")
+    direction = request.form.get("direction", "")
+    if newsfeed.ENABLED:
+        newsfeed.set_user_prediction(article_id, direction)
+    return redirect(f"/newsfeed/{article_id}?token={token}")
 
 
 @app.route("/backtest")

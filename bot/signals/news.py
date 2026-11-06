@@ -154,6 +154,22 @@ def _symbol_keywords(symbol: str) -> list[str]:
     return SYMBOL_KEYWORDS.get(symbol.upper(), [symbol.upper().replace("USDT", "").lower()])
 
 
+def symbol_keywords(symbol: str) -> list[str]:
+    """Public wrapper around _symbol_keywords -- reused by bot/newsfeed.py to
+    figure out which of a shared news pool's articles are actually about a
+    given symbol, the same way score_for_symbol does internally.
+    """
+    return _symbol_keywords(symbol)
+
+
+def score_text(text: str) -> int:
+    """Public wrapper around the keyword-lexicon scorer below -- reused by
+    bot/newsfeed.py for per-article up/down inference, separate from the
+    aggregated per-symbol score this module normally produces.
+    """
+    return _score_text(text)
+
+
 def _score_text(text: str) -> int:
     text = text.lower()
     score = 0
@@ -194,13 +210,21 @@ def _fetch_rss(feeds: list[str], lookback: timedelta) -> list[dict]:
         except Exception as exc:
             logger.warning("failed to fetch/parse feed %s: %s", url, exc)
             continue
+        feed_title = parsed.feed.get("title", "") if hasattr(parsed, "feed") else ""
         for entry in parsed.entries:
             ts = _entry_time(entry)
             if ts and ts < cutoff:
                 continue
             title = entry.get("title", "")
             summary = entry.get("summary", "")
-            articles.append({"title": title, "text": f"{title} {summary}", "ts": ts})
+            # link/summary/source kept as their own fields (not just folded
+            # into "text") so bot/newsfeed.py can show a real article detail
+            # page -- "text" (title+summary concatenated) stays as-is since
+            # score_for_symbol's keyword matching already depends on it.
+            articles.append({
+                "title": title, "text": f"{title} {summary}", "ts": ts,
+                "link": entry.get("link", ""), "summary": summary, "source": feed_title,
+            })
     return articles
 
 
@@ -224,7 +248,16 @@ def _fetch_newsapi(api_key: str, query: str, lookback: timedelta, page_size: int
     for a in data.get("articles", []):
         title = a.get("title") or ""
         desc = a.get("description") or ""
-        out.append({"title": title, "text": f"{title} {desc}", "ts": None})
+        ts = None
+        published_at = a.get("publishedAt")
+        if published_at:
+            try:
+                ts = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                ts = None
+        source = (a.get("source") or {}).get("name", "")
+        out.append({"title": title, "text": f"{title} {desc}", "ts": ts,
+                    "link": a.get("url", ""), "summary": desc, "source": source})
     return out
 
 
@@ -262,6 +295,17 @@ class NewsSignal:
         self._articles = deduped[: self.max_articles]
         self._cache_time = now
         logger.info("news refreshed: %d articles", len(self._articles))
+
+    def all_articles(self) -> list[dict]:
+        """Every cached article for this pool (not filtered by symbol) --
+        used by bot/newsfeed.py to collect raw article metadata (title/link/
+        published time) for the dashboard's news-feed feature, which needs
+        the full pool rather than one symbol's already-scored subset.
+        Reuses whatever score_for_symbol's own refresh already fetched, so
+        this never triggers an extra RSS fetch on its own.
+        """
+        self._refresh_if_needed()
+        return list(self._articles)
 
     def score_for_symbol(self, symbol: str) -> dict:
         self._refresh_if_needed()
