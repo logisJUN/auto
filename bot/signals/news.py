@@ -204,9 +204,28 @@ def _clean_summary(entry, title: str) -> str:
         content = entry.get("content") or []
         if content:
             raw = content[0].get("value", "") or ""
-    text = html.unescape(_HTML_TAG_RE.sub(" ", raw))
+    # Unescape BEFORE stripping tags, not after: some feeds (observed live:
+    # Google News) double-escape their markup, so entry.summary already
+    # contains literal "&lt;a href=...&gt;" text rather than a real "<a>"
+    # tag. Stripping tags first would never match that literal text at all,
+    # and only unescaping afterward would then reveal the un-stripped
+    # "<a href=...>" markup as visible text on the dashboard (exactly what
+    # was reported live).
+    text = _HTML_TAG_RE.sub(" ", html.unescape(raw))
     text = " ".join(text.split())
-    if not text or text.strip().lower() == title.strip().lower():
+    if not text:
+        return ""
+    norm_title = title.strip().lower()
+    norm_text = text.lower()
+    if norm_text == norm_title:
+        return ""
+    # Google News' <description> is always just "<headline></a>&nbsp;&nbsp;
+    # <font>Source Name</font>" -- never real article content -- so once
+    # tags are stripped this becomes "<title> <source name>", which the
+    # exact-match check above doesn't catch. Treating "title plus a short
+    # tail" as still being title-only avoids showing that as if it were a
+    # real summary.
+    if norm_text.startswith(norm_title) and len(text) - len(title) < 40:
         return ""
     return text
 

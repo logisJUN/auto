@@ -136,6 +136,35 @@ def test_fetch_rss_drops_a_summary_that_just_repeats_the_title(monkeypatch):
     assert articles[0]["summary"] == ""
 
 
+def test_fetch_rss_unescapes_double_escaped_markup_before_stripping_tags(monkeypatch):
+    # Google News' <description> is double-escaped XML: the literal text is
+    # "&lt;a href=...&gt;...&lt;/a&gt;", not a real <a> tag -- unescaping
+    # must happen before tag-stripping or the revealed tag text leaks
+    # straight onto the dashboard (this was observed live).
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>Earnings highlights</title><description>"
+        "&amp;lt;a href=\"https://news.google.com/x\" target=\"_blank\"&amp;gt;"
+        "Earnings highlights&amp;lt;/a&amp;gt;&amp;nbsp;&amp;nbsp;"
+        "&amp;lt;font&amp;gt;Yahoo Finance&amp;lt;/font&amp;gt;"
+        "</description></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert "href" not in articles[0]["summary"]
+    assert "<a" not in articles[0]["summary"]
+
+
+def test_fetch_rss_drops_a_google_news_style_title_plus_source_description(monkeypatch):
+    monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
+        "<item><title>Earnings highlights</title>"
+        "<description>&lt;a href=\"https://news.google.com/x\"&gt;Earnings highlights&lt;/a&gt;"
+        "&amp;nbsp;&amp;nbsp;&lt;font&gt;Yahoo Finance&lt;/font&gt;</description></item>"))
+
+    articles = _fetch_rss(["https://x/rss"], timedelta(hours=12))
+
+    assert articles[0]["summary"] == ""
+
+
 def test_fetch_rss_summary_is_empty_when_feed_provides_none(monkeypatch):
     monkeypatch.setattr("bot.signals.news.requests.get", lambda *a, **k: _rss_response(
         "<item><title>No description here</title></item>"))
