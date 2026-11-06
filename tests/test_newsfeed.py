@@ -4,6 +4,7 @@ the module's own docstring on why DATABASE_URL is required in production).
 """
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -13,6 +14,11 @@ import pytest
 from bot import newsfeed
 from bot.exchange.bybit_client import BybitAPIError
 from bot.signals.news import NewsSignal
+
+# Captured before the autouse fixture below stubs it out for every other
+# test -- the _fetch_article_body-specific tests restore the real function
+# with this reference so they can actually exercise it.
+_REAL_FETCH_ARTICLE_BODY = newsfeed._fetch_article_body
 
 
 class FakeCursor:
@@ -63,6 +69,9 @@ def _enabled(monkeypatch):
     monkeypatch.setattr(newsfeed, "ENABLED", True)
     monkeypatch.setattr(newsfeed, "DATABASE_URL", "postgres://fake")
     monkeypatch.setattr(newsfeed, "_schema_ready", False)
+    # No real HTTP fetch in these tests by default -- see the dedicated
+    # _fetch_article_body tests below for its own network-mocked behavior.
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", lambda link: None)
     yield
 
 
@@ -138,9 +147,9 @@ def test_save_article_if_new_inserts_and_fetches_price_at_publish(monkeypatch):
     assert len(insert_calls) == 1
     params = insert_calls[0][1]
     assert params[1] == "AAPLUSDT"  # symbol
-    assert params[8] == 123.45      # price_at_publish
-    assert params[9] == "up"        # "beats earnings estimates" scores bullish
-    assert params[6] == "earnings"  # category auto-detected
+    assert params[9] == 123.45      # price_at_publish
+    assert params[10] == "up"       # "beats earnings estimates" scores bullish
+    assert params[7] == "earnings"  # category auto-detected
 
 
 def test_save_article_if_new_skips_duplicate_without_fetching_price(monkeypatch):
@@ -155,6 +164,19 @@ def test_save_article_if_new_skips_duplicate_without_fetching_price(monkeypatch)
     assert not any("INSERT INTO" in c[0] for c in conn.calls)
 
 
+def test_save_article_if_new_stores_the_fetched_article_body(monkeypatch):
+    conn = FakeConn(fetchone_queue=[None])
+    monkeypatch.setattr(newsfeed, "_get_conn", lambda: conn)
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", lambda link: "Full article text here.")
+    client = MagicMock()
+    client.get_klines.return_value = [{"close": 1.0}]
+
+    newsfeed.save_article_if_new("AAPLUSDT", _article(), client)
+
+    insert_calls = [c for c in conn.calls if "INSERT INTO" in c[0]]
+    assert insert_calls[0][1][4] == "Full article text here."  # body_text
+
+
 def test_save_article_if_new_still_saves_when_price_lookup_fails(monkeypatch):
     conn = FakeConn(fetchone_queue=[None])
     monkeypatch.setattr(newsfeed, "_get_conn", lambda: conn)
@@ -165,7 +187,7 @@ def test_save_article_if_new_still_saves_when_price_lookup_fails(monkeypatch):
 
     assert result is True
     insert_calls = [c for c in conn.calls if "INSERT INTO" in c[0]]
-    assert insert_calls[0][1][8] is None  # price_at_publish
+    assert insert_calls[0][1][9] is None  # price_at_publish
 
 
 def test_save_filing_article_uses_neutral_direction_and_zero_confidence(monkeypatch):
@@ -180,9 +202,10 @@ def test_save_filing_article_uses_neutral_direction_and_zero_confidence(monkeypa
     assert result is True
     insert_calls = [c for c in conn.calls if "INSERT INTO" in c[0]]
     params = insert_calls[0][1]
-    assert params[6] == "filing"
-    assert params[9] == "neutral"
-    assert params[10] == 0.0
+    assert params[7] == "filing"
+    assert params[10] == "neutral"
+    assert params[11] == 0.0
+    assert params[4] is None  # body_text -- filings never get a body fetch
 
 
 def test_collect_from_news_cache_only_saves_symbols_whose_keywords_match(monkeypatch):
@@ -287,3 +310,68 @@ def test_get_accuracy_stats_shapes_breakdown_rows(monkeypatch):
     assert stats["user_accuracy_pct"] == 40.0
     assert stats["breakdown"] == [{"category": "earnings", "ai_direction": "up",
                                     "actual_direction": "down", "count": 3}]
+
+
+# -- _fetch_article_body --------------------------------------------------------
+
+def test_fetch_article_body_returns_none_for_an_empty_link(monkeypatch):
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", _REAL_FETCH_ARTICLE_BODY)
+    assert newsfeed._fetch_article_body("") is None
+
+
+def test_fetch_article_body_returns_none_when_the_request_fails(monkeypatch):
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", _REAL_FETCH_ARTICLE_BODY)
+    def fake_get(url, timeout=None, headers=None):
+        raise TimeoutError("simulated hang/timeout")
+    monkeypatch.setattr(newsfeed.requests, "get", fake_get)
+
+    assert newsfeed._fetch_article_body("https://example.com/story") is None
+
+
+def test_fetch_article_body_extracts_and_truncates_long_text(monkeypatch):
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", _REAL_FETCH_ARTICLE_BODY)
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.text = "<html><body><article><p>hello world</p></article></body></html>"
+    monkeypatch.setattr(newsfeed.requests, "get", lambda *a, **k: resp)
+    monkeypatch.setattr(newsfeed, "ARTICLE_BODY_MAX_CHARS", 5)
+    fake_trafilatura = MagicMock()
+    fake_trafilatura.extract.return_value = "hello world"
+    monkeypatch.setitem(sys.modules, "trafilatura", fake_trafilatura)
+
+    body = newsfeed._fetch_article_body("https://example.com/story")
+
+    assert body == "hello"  # truncated to ARTICLE_BODY_MAX_CHARS
+
+
+def test_fetch_article_body_returns_none_when_extraction_finds_nothing(monkeypatch):
+    monkeypatch.setattr(newsfeed, "_fetch_article_body", _REAL_FETCH_ARTICLE_BODY)
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.text = "<html><body></body></html>"
+    monkeypatch.setattr(newsfeed.requests, "get", lambda *a, **k: resp)
+    fake_trafilatura = MagicMock()
+    fake_trafilatura.extract.return_value = None
+    monkeypatch.setitem(sys.modules, "trafilatura", fake_trafilatura)
+
+    assert newsfeed._fetch_article_body("https://example.com/story") is None
+
+
+# -- collect_from_news_cache per-cycle cap --------------------------------------------------------
+
+def test_collect_from_news_cache_stops_once_the_per_cycle_cap_is_reached(monkeypatch):
+    monkeypatch.setattr(newsfeed, "MAX_NEW_ARTICLES_PER_COLLECT_CYCLE", 2)
+    saved = []
+    monkeypatch.setattr(newsfeed, "save_article_if_new", lambda symbol, article, client: saved.append(symbol) or True)
+    news_signal = MagicMock(spec=NewsSignal)
+    news_signal.all_articles.return_value = [
+        {"title": f"Apple story {i}", "text": f"Apple story {i}", "ts": datetime.now(timezone.utc),
+         "link": f"x{i}", "summary": "", "source": ""}
+        for i in range(5)
+    ]
+    news_cache = {1: news_signal}
+    symbols_by_news_key = {1: ["AAPLUSDT"]}
+
+    newsfeed.collect_from_news_cache(news_cache, symbols_by_news_key, MagicMock())
+
+    assert len(saved) == 2

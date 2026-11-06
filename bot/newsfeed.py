@@ -32,6 +32,8 @@ import os
 import time
 from datetime import datetime, timezone
 
+import requests
+
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.signals.news import NewsSignal, score_text, symbol_keywords
 
@@ -49,6 +51,21 @@ ENABLED = bool(DATABASE_URL)
 RESOLUTION_WINDOW_SEC = 4 * 3600
 
 KLINE_INTERVAL = "1"  # 1-minute candles, fine-grained enough for a "price at this moment" lookup
+
+# RSS/NewsAPI only ever hand over a title plus (at best) a one-line blurb --
+# never the real article text. Fetching the article's own link and running
+# it through trafilatura (a free, no-API-key HTML content extractor) is the
+# only way to get the actual body. Bounded tightly because this runs inline
+# in aggressive_btc's own main loop (same thread as trading signal checks):
+# a short per-request timeout caps how long one slow/unresponsive site can
+# delay that loop, and a per-cycle cap on how many NEW articles get a body
+# fetch at all caps the worst case (e.g. the very first run after
+# DATABASE_URL is set, when every already-cached article is "new" at once)
+# to a bounded amount of extra time rather than however many articles
+# happen to be new that cycle.
+ARTICLE_BODY_TIMEOUT_SEC = 8
+ARTICLE_BODY_MAX_CHARS = 4000
+MAX_NEW_ARTICLES_PER_COLLECT_CYCLE = 8
 
 EARNINGS_KEYWORDS = [
     "earnings", "quarterly results", "quarterly report", "q1 20", "q2 20", "q3 20", "q4 20",
@@ -81,6 +98,33 @@ def _article_id(symbol: str, link: str, title: str) -> str:
     return hashlib.sha256(f"{symbol}|{key}".encode("utf-8")).hexdigest()[:32]
 
 
+def _fetch_article_body(link: str) -> str | None:
+    """Best-effort full article text via the article's own link, not just
+    whatever (if anything) the RSS feed's <description> gave us. None on
+    any failure -- a site that blocks scraping, requires JS to render the
+    article, redirects somewhere unparseable (Google News' redirect links
+    are the common case here), or simply times out is not an error, just a
+    body this particular article won't have.
+    """
+    if not link:
+        return None
+    try:
+        resp = requests.get(link, timeout=ARTICLE_BODY_TIMEOUT_SEC,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+    except Exception:
+        return None
+    try:
+        import trafilatura
+        text = trafilatura.extract(resp.text, include_comments=False, include_tables=False)
+    except Exception:
+        logger.warning("newsfeed: trafilatura extraction failed for %s", link, exc_info=True)
+        return None
+    if not text:
+        return None
+    return text.strip()[:ARTICLE_BODY_MAX_CHARS]
+
+
 def _get_conn():
     import psycopg2
     return psycopg2.connect(DATABASE_URL)
@@ -97,6 +141,7 @@ def _ensure_schema(conn):
                 symbol TEXT NOT NULL,
                 title TEXT NOT NULL,
                 summary TEXT,
+                body_text TEXT,
                 link TEXT,
                 source TEXT,
                 category TEXT NOT NULL,
@@ -115,6 +160,11 @@ def _ensure_schema(conn):
                 created_at DOUBLE PRECISION NOT NULL
             )
         """)
+        # Migration for a table created before body_text existed (CREATE
+        # TABLE IF NOT EXISTS above is a no-op against an already-existing
+        # table, so this is the only thing that actually adds the column to
+        # a DB set up before this feature's full-article-body fetch shipped).
+        cur.execute("ALTER TABLE newsfeed_articles ADD COLUMN IF NOT EXISTS body_text TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_newsfeed_published_at "
                     "ON newsfeed_articles (published_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_newsfeed_resolve "
@@ -138,7 +188,9 @@ def save_article_if_new(symbol: str, article: dict, client: BybitClient, categor
     ts/link/summary/source). Returns True if a new row was inserted, False
     if it already existed (or ts is unparseable, or the feature is
     disabled) -- callers don't need to distinguish those, they just mean
-    "nothing new to do here."
+    "nothing new to do here." Only a genuinely new row triggers the extra
+    article-page fetch (see _fetch_article_body) -- a duplicate never
+    re-fetches anything.
     """
     if not ENABLED:
         return False
@@ -170,16 +222,20 @@ def save_article_if_new(symbol: str, article: dict, client: BybitClient, categor
         # read (e.g. a routine 8-K literally titled around "bankruptcy" or
         # "default" scoring as a strong bearish lean it never claimed to be).
         score = 0 if category == "filing" else score_text(article.get("text", title))
+        # Only fetch the real page for articles actually worth it -- a bare
+        # filing notification (category="filing") has no article page of
+        # its own to fetch (the link is SEC's filing index, not a story).
+        body_text = _fetch_article_body(link) if category != "filing" else None
 
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO newsfeed_articles
-                    (id, symbol, title, summary, link, source, category, published_at,
+                    (id, symbol, title, summary, body_text, link, source, category, published_at,
                      price_at_publish, ai_direction, ai_confidence, resolve_at, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
             """, (
-                article_id, symbol, title, article.get("summary", ""), link, article.get("source", ""),
+                article_id, symbol, title, article.get("summary", ""), body_text, link, article.get("source", ""),
                 category, published_at, price_at_publish, _direction_from_score(score),
                 _confidence_from_score(score), published_at + RESOLUTION_WINDOW_SEC, time.time(),
             ))
@@ -202,15 +258,21 @@ def collect_from_news_cache(news_cache: dict[int, NewsSignal], symbols_by_news_k
     """
     if not ENABLED:
         return
+    saved_this_cycle = 0
     for news_key, news_signal in news_cache.items():
         symbols = symbols_by_news_key.get(news_key, [])
         if not symbols:
             continue
         for article in news_signal.all_articles():
+            if saved_this_cycle >= MAX_NEW_ARTICLES_PER_COLLECT_CYCLE:
+                return  # remainder picked up on a later cycle -- see the cap's own docstring note above
             text_lower = article.get("text", "").lower()
             for symbol in symbols:
                 if any(k in text_lower for k in symbol_keywords(symbol)):
-                    save_article_if_new(symbol, article, client)
+                    if save_article_if_new(symbol, article, client):
+                        saved_this_cycle += 1
+                    if saved_this_cycle >= MAX_NEW_ARTICLES_PER_COLLECT_CYCLE:
+                        return
 
 
 def save_filing_article(symbol: str, filing: dict, client: BybitClient) -> bool:
@@ -313,7 +375,7 @@ def resolve_due_articles(client: BybitClient, limit: int = 20) -> int:
     return resolved_count
 
 
-_COLUMNS = ["id", "symbol", "title", "summary", "link", "source", "category", "published_at",
+_COLUMNS = ["id", "symbol", "title", "summary", "body_text", "link", "source", "category", "published_at",
             "price_at_publish", "ai_direction", "ai_confidence", "user_direction", "user_predicted_at",
             "resolve_at", "resolved", "price_at_resolve", "actual_direction", "ai_correct", "user_correct",
             "created_at"]

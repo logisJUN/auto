@@ -1303,11 +1303,15 @@ _NEWSFEED_DETAIL_TEMPLATE = """
   </div>
 
   <div class="card">
-    <h2 style="font-size:0.9rem;">요약</h2>
-    {% if a.summary %}
+    {% if a.body_text %}
+    <h2 style="font-size:0.9rem;">본문 (원문에서 자동 추출)</h2>
+    <div style="white-space:pre-line;">{{ a.body_text }}</div>
+    {% elif a.summary %}
+    <h2 style="font-size:0.9rem;">요약 (피드 제공)</h2>
     <div>{{ a.summary }}</div>
     {% else %}
-    <div class="small">이 기사는 원문 피드에 요약이 없어요. 위 "원문 보기"에서 직접 확인하세요.</div>
+    <h2 style="font-size:0.9rem;">요약</h2>
+    <div class="small">본문을 가져오지 못했어요 (로그인/구독 필요, 자바스크립트 렌더링 등). 위 "원문 보기"에서 직접 확인하세요.</div>
     {% endif %}
   </div>
 
