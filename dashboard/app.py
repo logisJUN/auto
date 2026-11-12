@@ -28,7 +28,7 @@ from bot.exchange.bybit_client import BybitClient, BybitAPIError
 from bot.logger import compute_performance_summary, read_recent_decisions
 from bot.risk import stress_test
 from bot.state import StateStore
-from bot import aggressive_btc, newsfeed
+from bot import aggressive_btc, control_flags, newsfeed
 
 # Render's containers run in UTC -- time.localtime() would show every
 # timestamp in the dashboard 9 hours behind. Converting explicitly to KST
@@ -856,13 +856,25 @@ def toggle_aggressive_btc():
     reset_daily_loss: this dashboard process and the aggressive_btc bot
     process each hold their own state, so this just touches/removes a flag
     file on disk that the bot's own process polls on every try_enter() call.
+
+    Also writes through to control_flags (a durable Postgres copy, when
+    DATABASE_URL is set) -- the local file alone doesn't survive a restart
+    (no persistent disk on Render's free plan), which previously meant a
+    paused bot could come back un-paused on its own after a redeploy, a
+    crash, or the free-plan service sleeping and waking back up (observed
+    live). aggressive_btc.main()'s loop resyncs the local file from this
+    durable copy every iteration, so a restarted process recovers the real
+    paused state within one loop tick instead of silently defaulting to
+    "not paused".
     """
     _check_token()
+    paused = request.form.get("action") == "pause"
     flag_path = Path(aggressive_btc.pause_flag_path())
-    if request.form.get("action") == "pause":
+    if paused:
         flag_path.touch()
     else:
         flag_path.unlink(missing_ok=True)
+    control_flags.set_flag("aggressive_btc_paused", paused)
     token = request.args.get("token", "")
     return redirect(f"/?token={token}")
 

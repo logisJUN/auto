@@ -1155,6 +1155,50 @@ def test_manage_open_position_keeps_managing_an_existing_trade_while_paused(tmp_
     assert history[-1]["reason"] == "hourly_cutoff"
 
 
+# -- resync_pause_flag_from_db ---------------------------------------------------------
+
+def test_resync_leaves_local_file_alone_when_db_flag_is_unknown(tmp_path, monkeypatch):
+    flag_path = tmp_path / "aggressive_btc_paused.flag"
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    monkeypatch.setattr(aggressive_btc.control_flags, "get_flag", lambda name: None)
+
+    aggressive_btc.resync_pause_flag_from_db()
+
+    assert not flag_path.exists()
+
+
+def test_resync_restores_a_missing_local_file_when_db_says_paused(tmp_path, monkeypatch):
+    flag_path = tmp_path / "aggressive_btc_paused.flag"  # simulates a restart that wiped it
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    monkeypatch.setattr(aggressive_btc.control_flags, "get_flag", lambda name: True)
+
+    aggressive_btc.resync_pause_flag_from_db()
+
+    assert flag_path.exists()
+
+
+def test_resync_clears_a_stale_local_file_when_db_says_not_paused(tmp_path, monkeypatch):
+    flag_path = tmp_path / "aggressive_btc_paused.flag"
+    flag_path.touch()
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    monkeypatch.setattr(aggressive_btc.control_flags, "get_flag", lambda name: False)
+
+    aggressive_btc.resync_pause_flag_from_db()
+
+    assert not flag_path.exists()
+
+
+def test_resync_is_a_noop_when_local_file_already_matches_db(tmp_path, monkeypatch):
+    flag_path = tmp_path / "aggressive_btc_paused.flag"
+    flag_path.touch()
+    monkeypatch.setattr(aggressive_btc, "pause_flag_path", lambda: str(flag_path))
+    monkeypatch.setattr(aggressive_btc.control_flags, "get_flag", lambda name: True)
+
+    aggressive_btc.resync_pause_flag_from_db()  # must not raise
+
+    assert flag_path.exists()
+
+
 def test_try_enter_noop_while_a_position_is_already_open(tmp_path):
     strategy, state, client, poly_signal = _make_strategy(tmp_path)
     state.set_trade(SYMBOL, {

@@ -175,6 +175,7 @@ from dataclasses import dataclass, field
 # Top-level module (repo root, not inside bot/) so it's the one file you open
 # to retune entry sensitivity without digging through strategy code.
 from aggressive_btc_settings import ENTRY_THRESHOLD
+from bot import control_flags
 from bot.config import Secrets, load_config
 from bot.exchange.bybit_client import BybitAPIError, BybitClient
 from bot.logger import log_decision
@@ -602,6 +603,30 @@ def pause_flag_path() -> str:
     bot's own process polls for it on every try_enter() call.
     """
     return os.path.join(os.getenv("DATA_DIR", "data"), "aggressive_btc_paused.flag")
+
+
+def resync_pause_flag_from_db() -> None:
+    """Called once at the top of every main() loop iteration, before any
+    strategy gets a chance to try_enter() -- restores pause_flag_path()'s
+    local sentinel file from its durable Postgres copy (see
+    bot/control_flags.py's module docstring for the restart-wipes-the-local-
+    file bug this fixes). No-op when control_flags.ENABLED is False (no
+    DATABASE_URL) -- local-file-only behavior is then unchanged.
+    """
+    paused = control_flags.get_flag("aggressive_btc_paused")
+    if paused is None:
+        return  # unknown (disabled, or never explicitly set) -- nothing to resync, leave the local file alone
+    flag_path = pause_flag_path()
+    exists = os.path.exists(flag_path)
+    if paused and not exists:
+        os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+        with open(flag_path, "w"):
+            pass
+        logger.warning("aggressive_btc: restored pause flag from DB (local file was missing -- "
+                        "likely a restart wiped it)")
+    elif not paused and exists:
+        os.remove(flag_path)
+        logger.warning("aggressive_btc: cleared stale local pause flag per DB (resume) state")
 
 
 def compute_leverage(atr_pct: float, target_pct: float = 12.0, min_leverage: float = 6.0,
@@ -1412,6 +1437,10 @@ def main():
 
     while True:
         loop_start = time.time()
+        try:
+            resync_pause_flag_from_db()
+        except Exception:
+            logger.exception("aggressive_btc: unhandled error resyncing pause flag from DB")
         _reconcile_orphaned_positions(client, state, notifier, log_dir, configs_by_symbol)
         for strategy in strategies:
             try:
